@@ -25,11 +25,13 @@ public:
   void unwatch(WatcherRef watcher);
   void unref();
   void handleWatcherError(WatcherError &err);
+  void invalidate(WatcherRef watcher);
 
   std::mutex mMutex;
   std::thread mThread;
 private:
   std::unordered_set<WatcherRef> mSubscriptions;
+  std::unordered_set<WatcherRef> mInvalidSubscriptions;
   std::atomic<size_t> mSharedReservations {0};
   std::mutex mStartupMutex;
   std::condition_variable mStartupCondition;

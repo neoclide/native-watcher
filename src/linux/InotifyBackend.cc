@@ -212,6 +212,7 @@ void InotifyBackend::handleOverflow(std::unordered_set<WatcherRef> &watchers) {
   }
 
   for (const auto &watcher : overflowed) {
+    invalidate(watcher);
     watcher->mEvents.error(
       "inotify queue overflow. The subscription can no longer guarantee "
       "complete filesystem events."

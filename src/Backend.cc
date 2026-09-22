@@ -138,12 +138,18 @@ Backend::~Backend() {
 void Backend::watch(WatcherRef watcher) {
   std::unique_lock<std::mutex> lock(mMutex);
   auto res = mSubscriptions.find(watcher);
-  if (res == mSubscriptions.end()) {
+  bool isNew = res == mSubscriptions.end();
+  bool wasInvalid = !isNew && mInvalidSubscriptions.erase(watcher) > 0;
+  if (isNew || wasInvalid) {
     try {
       this->subscribe(watcher);
       mSubscriptions.insert(watcher);
     } catch (std::exception&) {
-      unref();
+      if (wasInvalid) {
+        mInvalidSubscriptions.insert(watcher);
+      } else {
+        unref();
+      }
       throw;
     }
   }
@@ -152,11 +158,15 @@ void Backend::watch(WatcherRef watcher) {
 void Backend::unwatch(WatcherRef watcher) {
   std::unique_lock<std::mutex> lock(mMutex);
   size_t deleted = mSubscriptions.erase(watcher);
+  bool wasInvalid = mInvalidSubscriptions.erase(watcher) > 0;
   if (deleted > 0) {
     try {
       this->unsubscribe(watcher);
     } catch (...) {
       mSubscriptions.insert(watcher);
+      if (wasInvalid) {
+        mInvalidSubscriptions.insert(watcher);
+      }
       throw;
     }
     lock.unlock();
@@ -164,6 +174,13 @@ void Backend::unwatch(WatcherRef watcher) {
     lock.lock();
     watcher->removeBackend(this);
     unref();
+  }
+}
+
+// This function must be called while holding mMutex.
+void Backend::invalidate(WatcherRef watcher) {
+  if (mSubscriptions.count(watcher) > 0) {
+    mInvalidSubscriptions.insert(watcher);
   }
 }
 

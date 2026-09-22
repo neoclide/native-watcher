@@ -407,12 +407,12 @@ public:
 
 private:
   void failOverflow() {
+    mOverflowed = true;
     mWatcher->mEvents.error(
       "ReadDirectoryChangesW buffer overflow. The subscription can no "
       "longer guarantee complete filesystem events."
     );
     requestStop();
-    mWatcher->notify();
   }
 
   void beginStop() {
@@ -432,6 +432,12 @@ private:
       CloseHandle(mDirectoryHandle);
       mDirectoryHandle = INVALID_HANDLE_VALUE;
     }
+    if (mOverflowed) {
+      std::unique_lock<std::mutex> lock(mBackend->mMutex);
+      mBackend->invalidate(mWatcher);
+      lock.unlock();
+      mWatcher->notify();
+    }
     mStoppedSignal.notify();
   }
 
@@ -442,6 +448,7 @@ private:
   bool mPollPending;
   std::atomic<bool> mStopRequested {false};
   std::atomic<bool> mStopped {false};
+  bool mOverflowed = false;
   Signal mStoppedSignal;
   std::optional<std::string> mPendingRenamePath;
   uint64_t mRenameSequence = 0;
