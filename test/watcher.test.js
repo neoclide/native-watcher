@@ -299,6 +299,18 @@ test('removes subscriptions when their Worker environment exits', async () => {
   assert.match(stdout, /worker cleanup ok/);
 });
 
+test('serializes concurrent subscription registry access', async () => {
+  const fixture = path.join(
+    __dirname,
+    'fixtures',
+    'concurrent-subscriptions.js',
+  );
+  const {stdout} = await execFileAsync(process.execPath, [fixture], {
+    timeout: 20000,
+  });
+  assert.match(stdout, /concurrent subscriptions ok/);
+});
+
 test(
   'waits for pending Windows directory reads before unsubscribe resolves',
   {skip: process.platform !== 'win32'},

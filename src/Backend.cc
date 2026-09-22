@@ -16,6 +16,11 @@ static std::unordered_map<std::string, std::shared_ptr<Backend>>& getSharedBacke
   return *sharedBackends;
 }
 
+static std::mutex& getSharedBackendsMutex() {
+  static std::mutex* mutex = new std::mutex();
+  return *mutex;
+}
+
 std::shared_ptr<Backend> getBackend(std::string backend) {
   // Use the operating system backend directly. Exact rename correlation is
   // available from inotify and ReadDirectoryChangesW.
@@ -38,9 +43,12 @@ std::shared_ptr<Backend> getBackend(std::string backend) {
 }
 
 std::shared_ptr<Backend> Backend::getShared(std::string backend) {
-  auto found = getSharedBackends().find(backend);
-  if (found != getSharedBackends().end()) {
-    return found->second;
+  {
+    std::unique_lock<std::mutex> lock(getSharedBackendsMutex());
+    auto found = getSharedBackends().find(backend);
+    if (found != getSharedBackends().end()) {
+      return found->second;
+    }
   }
 
   auto result = getBackend(backend);
@@ -49,11 +57,17 @@ std::shared_ptr<Backend> Backend::getShared(std::string backend) {
   }
 
   result->run();
-  getSharedBackends().emplace(backend, result);
-  return result;
+  std::shared_ptr<Backend> selected;
+  {
+    std::unique_lock<std::mutex> lock(getSharedBackendsMutex());
+    auto inserted = getSharedBackends().emplace(backend, result);
+    selected = inserted.first->second;
+  }
+  return selected;
 }
 
 void removeShared(Backend *backend) {
+  std::unique_lock<std::mutex> lock(getSharedBackendsMutex());
   for (auto it = getSharedBackends().begin(); it != getSharedBackends().end(); it++) {
     if (it->second.get() == backend) {
       getSharedBackends().erase(it);
