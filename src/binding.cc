@@ -84,12 +84,13 @@ public:
     );
 
     backend = selectedBackend;
-    watcher->watch(fn);
+    callback = Napi::Persistent(fn);
+    addedCallback = watcher->watch(fn);
   }
 
   ~SubscribeRunner() override {
-    if (cleanupAfterFailure) {
-      watcher->destroy();
+    if (cleanupAfterFailure && addedCallback) {
+      watcher->unwatch(callback.Value());
     }
     releaseBackend();
   }
@@ -101,6 +102,7 @@ private:
   napi_env callbackEnv;
   bool hasBackendReservation = true;
   bool cleanupAfterFailure = false;
+  bool addedCallback = false;
 
   void releaseBackend() {
     if (hasBackendReservation) {
