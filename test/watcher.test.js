@@ -612,6 +612,18 @@ test('ignore rejects RegExp flags', async (t) => {
   );
 });
 
+test('invalid native RegExp syntax does not leave a subscription running', async () => {
+  const fixture = path.join(
+    __dirname,
+    'fixtures',
+    'invalid-regex-cleanup.js',
+  );
+  const {stdout} = await execFileAsync(process.execPath, [fixture], {
+    timeout: 5000,
+  });
+  assert.match(stdout, /invalid regex rejected cleanly/);
+});
+
 test('a move across an ignore boundary is not reported as a rename pair', async (t) => {
   const {directory, collector} = await createFixture(t, {ignore: ['ignored']});
   const ignoredDirectory = path.join(directory, 'ignored');

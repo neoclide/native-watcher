@@ -28,9 +28,7 @@ std::unordered_set<std::string> getIgnorePaths(Env env, Value opts) {
   return result;
 }
 
-std::unordered_set<Glob> getIgnoreGlobs(Env env, Value opts) {
-  std::unordered_set<Glob> result;
-
+bool getIgnoreGlobs(Env env, Value opts, std::unordered_set<Glob> &result) {
   if (opts.IsObject()) {
     Value v = opts.As<Object>().Get(String::New(env, "ignoreGlobs"));
     if (v.IsArray()) {
@@ -43,13 +41,14 @@ std::unordered_set<Glob> getIgnoreGlobs(Env env, Value opts) {
             result.emplace(key);
           } catch (const std::regex_error& e) {
             Error::New(env, e.what()).ThrowAsJavaScriptException();
+            return false;
           }
         }
       }
     }
   }
 
-  return result;
+  return true;
 }
 
 std::shared_ptr<Backend> getBackend(Env env, Value opts) {
@@ -64,16 +63,23 @@ std::shared_ptr<Backend> getBackend(Env env, Value opts) {
 
 class SubscribeRunner : public PromiseRunner {
 public:
-  SubscribeRunner(Env env, Value dir, Value fn, Value opts) : PromiseRunner(env) {
+  SubscribeRunner(
+    Env env,
+    std::string dir,
+    Function fn,
+    std::unordered_set<std::string> ignorePaths,
+    std::unordered_set<Glob> ignoreGlobs,
+    std::shared_ptr<Backend> selectedBackend
+  ) : PromiseRunner(env) {
     callbackEnv = env;
     watcher = Watcher::getShared(
-      std::string(dir.As<String>().Utf8Value().c_str()),
-      getIgnorePaths(env, opts),
-      getIgnoreGlobs(env, opts)
+      dir,
+      ignorePaths,
+      ignoreGlobs
     );
 
-    backend = getBackend(env, opts);
-    watcher->watch(fn.As<Function>());
+    backend = selectedBackend;
+    watcher->watch(fn);
   }
 
 private:
@@ -98,15 +104,22 @@ private:
 
 class UnsubscribeRunner : public PromiseRunner {
 public:
-  UnsubscribeRunner(Env env, Value dir, Value fn, Value opts) : PromiseRunner(env) {
+  UnsubscribeRunner(
+    Env env,
+    std::string dir,
+    Function fn,
+    std::unordered_set<std::string> ignorePaths,
+    std::unordered_set<Glob> ignoreGlobs,
+    std::shared_ptr<Backend> selectedBackend
+  ) : PromiseRunner(env) {
     watcher = Watcher::getShared(
-      std::string(dir.As<String>().Utf8Value().c_str()),
-      getIgnorePaths(env, opts),
-      getIgnoreGlobs(env, opts)
+      dir,
+      ignorePaths,
+      ignoreGlobs
     );
 
-    backend = getBackend(env, opts);
-    shouldUnwatch = watcher->unwatch(fn.As<Function>());
+    backend = selectedBackend;
+    shouldUnwatch = watcher->unwatch(fn);
   }
 
 private:
@@ -139,7 +152,21 @@ Value queueSubscriptionWork(const CallbackInfo& info) {
     return env.Null();
   }
 
-  Runner *runner = new Runner(info.Env(), info[0], info[1], info[2]);
+  auto ignorePaths = getIgnorePaths(env, info[2]);
+  std::unordered_set<Glob> ignoreGlobs;
+  if (!getIgnoreGlobs(env, info[2], ignoreGlobs)) {
+    return env.Null();
+  }
+
+  auto backend = getBackend(env, info[2]);
+  Runner *runner = new Runner(
+    env,
+    info[0].As<String>().Utf8Value(),
+    info[1].As<Function>(),
+    std::move(ignorePaths),
+    std::move(ignoreGlobs),
+    backend
+  );
   return runner->queue();
 }
 
