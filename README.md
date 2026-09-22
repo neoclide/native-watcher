@@ -189,6 +189,43 @@ used for rename correlation, and starts the FSEvents stream before that scan so
 changes during initialization can be reconciled. Very large trees therefore add
 work to `subscribe`; these scans run inside the native addon.
 
+### Performance and threading
+
+The startup scan is currently single-threaded per subscription. It runs through
+N-API async work on a libuv worker, so JavaScript timers and the main event loop
+continue to run. The practical effects are:
+
+- `await subscribe()` resolves after the scan, so a large tree increases
+  subscription latency.
+- One libuv worker-pool slot is occupied while a subscription is initialized.
+- JavaScript execution is not synchronously blocked by the traversal.
+- A populated directory discovered later is scanned on the native backend
+  thread before its complete create batch is delivered.
+
+On 2026-09-22, a warm-cache macOS x64 measurement on a 6-core/12-thread machine
+gave these results. These numbers describe that machine and filesystem cache,
+not a cross-machine guarantee.
+
+| Tree | Entries | Median subscribe | Range | Maximum 1ms timer lag | First RSS increase |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| coc.nvim checkout | about 7,039 | 65ms | 58-85ms | 0.89ms | about 6 MiB |
+| generated tree | 50,501 | 228ms | 211-248ms | 1.38ms | about 24 MiB |
+
+Reproduce the subscription measurement against any existing directory with:
+
+```sh
+npm run benchmark:subscribe -- /path/to/tree 7
+```
+
+The addon does not currently create an indexing thread per CPU core. At the
+measured scale, the serial scan is short and the JavaScript event loop remains
+responsive. Unbounded core-based traversal would increase filesystem contention
+and would make the stream-start/scan/event-reconciliation boundary harder to
+keep correct. If substantially larger cold-cache trees become a demonstrated
+startup bottleneck, the safe next design is a bounded pool partitioned by
+top-level directory, capped by physical cores and a small fixed maximum, followed
+by a single deterministic merge into the identity index.
+
 ## Differences from `@parcel/watcher`
 
 This addon keeps a compatible realtime event vocabulary and compatible ignore
