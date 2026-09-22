@@ -36,6 +36,10 @@
             "src/linux/InotifyBackend.cc",
             "src/unix/legacy.cc"
           ],
+          "ldflags": [
+            "-static-libstdc++",
+            "-Wl,-Bsymbolic-functions"
+          ],
           "defines": ["INOTIFY"]
         }],
         ["OS=='win'", {

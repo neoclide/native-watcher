@@ -28,7 +28,12 @@ std::unordered_set<std::string> getIgnorePaths(Env env, Value opts) {
   return result;
 }
 
-bool getIgnoreGlobs(Env env, Value opts, std::unordered_set<Glob> &result) {
+bool getIgnoreGlobs(
+  Env env,
+  Value opts,
+  std::unordered_set<Glob> &result,
+  std::string &error
+) {
   if (opts.IsObject()) {
     Value v = opts.As<Object>().Get(String::New(env, "ignoreGlobs"));
     if (v.IsArray()) {
@@ -40,7 +45,7 @@ bool getIgnoreGlobs(Env env, Value opts, std::unordered_set<Glob> &result) {
           try {
             result.emplace(key);
           } catch (const std::regex_error& e) {
-            Error::New(env, e.what()).ThrowAsJavaScriptException();
+            error = e.what();
             return false;
           }
         }
@@ -209,8 +214,11 @@ Value queueSubscriptionWork(const CallbackInfo& info) {
 
   auto ignorePaths = getIgnorePaths(env, info[2]);
   std::unordered_set<Glob> ignoreGlobs;
-  if (!getIgnoreGlobs(env, info[2], ignoreGlobs)) {
-    return env.Null();
+  std::string ignoreGlobError;
+  if (!getIgnoreGlobs(env, info[2], ignoreGlobs, ignoreGlobError)) {
+    auto deferred = Promise::Deferred::New(env);
+    deferred.Reject(Error::New(env, ignoreGlobError).Value());
+    return deferred.Promise();
   }
 
   auto backend = getBackend(env, info[2]);
