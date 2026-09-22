@@ -253,6 +253,7 @@ public:
     poll();
 
     // Read change events
+    mPreviousRemovedPaths = std::move(mRemovedPaths);
     mRemovedPaths.clear();
     BYTE *base = mReadBuffer.data();
     BYTE *end = base + numBytes;
@@ -291,7 +292,7 @@ public:
     }
 
     flushPendingRename();
-    mRemovedPaths.clear();
+    mPreviousRemovedPaths.clear();
 
     mWatcher->notify();
   }
@@ -307,6 +308,7 @@ public:
       case FILE_ACTION_ADDED: {
         flushPendingRename();
         mRemovedPaths.erase(path);
+        mPreviousRemovedPaths.erase(path);
         addPath(path);
         break;
       }
@@ -322,7 +324,8 @@ public:
         // the known tree; attributes only refresh its current root entry.
         if (mPendingRenamePath.has_value()) {
           bool targetExisted = mTree->find(path) != nullptr ||
-            mRemovedPaths.erase(path) > 0;
+            mRemovedPaths.erase(path) > 0 ||
+            mPreviousRemovedPaths.erase(path) > 0;
           if (targetExisted) {
             mWatcher->mEvents.remove(*mPendingRenamePath);
             mWatcher->mEvents.create(path);
@@ -474,6 +477,7 @@ private:
   Signal mStoppedSignal;
   std::optional<std::string> mPendingRenamePath;
   std::unordered_set<std::string> mRemovedPaths;
+  std::unordered_set<std::string> mPreviousRemovedPaths;
   uint64_t mRenameSequence = 0;
   HANDLE mDirectoryHandle;
   std::vector<BYTE> mReadBuffer;
