@@ -1,0 +1,33 @@
+{
+  "name": "native-watcher",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Minimal native filesystem watcher with exact rename correlation",
+  "main": "index.js",
+  "types": "index.d.ts",
+  "files": [
+    "binding.gyp",
+    "index.js",
+    "index.d.ts",
+    "wrapper.js",
+    "src"
+  ],
+  "scripts": {
+    "build": "node-gyp rebuild",
+    "install": "node-gyp rebuild",
+    "test": "node --test test/*.test.js",
+    "test:rename": "node --test test/rename.test.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "is-glob": "^4.0.3",
+    "node-addon-api": "^8.0.0",
+    "picomatch": "^4.0.0"
+  },
+  "devDependencies": {
+    "node-gyp": "^12.0.0"
+  },
+  "license": "MIT"
+}
