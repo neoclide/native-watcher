@@ -47,7 +47,10 @@ void BruteForceBackend::readTree(WatcherRef watcher, std::shared_ptr<DirTree> tr
         }
 
         tree->add(fullPath, CONVERT_TIME(ffd.ftLastWriteTime), ffd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY);
-        if (ffd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
+        if (
+          (ffd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) &&
+          !(ffd.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT)
+        ) {
           directories.push(fullPath);
         }
       }

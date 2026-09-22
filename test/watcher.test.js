@@ -412,6 +412,35 @@ test(
 );
 
 test(
+  'does not recurse into a Windows junction during startup',
+  {skip: process.platform !== 'win32'},
+  async () => {
+    const parent = await fs.mkdtemp(
+      path.join(os.tmpdir(), 'native-watcher-junction-'),
+    );
+    const directory = path.join(parent, 'watched');
+    const junction = path.join(directory, 'parent-link');
+    await fs.mkdir(directory);
+    await fs.symlink(parent, junction, 'junction');
+
+    const collector = new EventCollector();
+    const subscription = await watcher.subscribe(
+      directory,
+      collector.callback,
+    );
+    try {
+      const visible = path.join(directory, 'visible.txt');
+      const observed = collector.waitFor('create', visible);
+      await fs.writeFile(visible, 'event');
+      await observed;
+    } finally {
+      await subscription.unsubscribe();
+      await fs.rm(parent, {recursive: true, force: true});
+    }
+  },
+);
+
+test(
   'a FIFO event does not block other macOS subscriptions',
   {skip: process.platform !== 'darwin'},
   async () => {
