@@ -44,6 +44,7 @@ async function main() {
         worker.once('error', reject);
       })),
     ]);
+    await Promise.all(workers.map((worker) => worker.terminate()));
 
     const eventPath = path.join(directory, 'after-concurrency');
     let resolveEvent;

@@ -47,6 +47,7 @@ std::shared_ptr<Backend> Backend::getShared(std::string backend) {
     std::unique_lock<std::mutex> lock(getSharedBackendsMutex());
     auto found = getSharedBackends().find(backend);
     if (found != getSharedBackends().end()) {
+      found->second->mSharedReservations.fetch_add(1);
       return found->second;
     }
   }
@@ -62,6 +63,7 @@ std::shared_ptr<Backend> Backend::getShared(std::string backend) {
     std::unique_lock<std::mutex> lock(getSharedBackendsMutex());
     auto inserted = getSharedBackends().emplace(backend, result);
     selected = inserted.first->second;
+    selected->mSharedReservations.fetch_add(1);
   }
   return selected;
 }
@@ -148,8 +150,15 @@ void Backend::unwatch(WatcherRef watcher) {
 }
 
 void Backend::unref() {
-  if (mSubscriptions.size() == 0) {
+  if (mSubscriptions.size() == 0 && mSharedReservations.load() == 0) {
     removeShared(this);
+  }
+}
+
+void Backend::releaseShared() {
+  if (mSharedReservations.fetch_sub(1) == 1) {
+    std::unique_lock<std::mutex> lock(mMutex);
+    unref();
   }
 }
 

@@ -82,11 +82,23 @@ public:
     watcher->watch(fn);
   }
 
+  ~SubscribeRunner() override {
+    releaseBackend();
+  }
+
 private:
   WatcherRef watcher;
   std::shared_ptr<Backend> backend;
   FunctionReference callback;
   napi_env callbackEnv;
+  bool hasBackendReservation = true;
+
+  void releaseBackend() {
+    if (hasBackendReservation) {
+      hasBackendReservation = false;
+      backend->releaseShared();
+    }
+  }
 
   void execute() override {
     try {
@@ -95,8 +107,10 @@ private:
       if (!watcher->hasCallbacksForEnvironment(callbackEnv)) {
         backend->unwatch(watcher);
       }
+      releaseBackend();
     } catch (std::exception&) {
       watcher->destroy();
+      releaseBackend();
       throw;
     }
   }
@@ -122,14 +136,32 @@ public:
     shouldUnwatch = watcher->unwatch(fn);
   }
 
+  ~UnsubscribeRunner() override {
+    releaseBackend();
+  }
+
 private:
   WatcherRef watcher;
   std::shared_ptr<Backend> backend;
   bool shouldUnwatch;
+  bool hasBackendReservation = true;
+
+  void releaseBackend() {
+    if (hasBackendReservation) {
+      hasBackendReservation = false;
+      backend->releaseShared();
+    }
+  }
 
   void execute() override {
-    if (shouldUnwatch) {
-      backend->unwatch(watcher);
+    try {
+      if (shouldUnwatch) {
+        backend->unwatch(watcher);
+      }
+      releaseBackend();
+    } catch (...) {
+      releaseBackend();
+      throw;
     }
   }
 };
@@ -159,14 +191,20 @@ Value queueSubscriptionWork(const CallbackInfo& info) {
   }
 
   auto backend = getBackend(env, info[2]);
-  Runner *runner = new Runner(
-    env,
-    info[0].As<String>().Utf8Value(),
-    info[1].As<Function>(),
-    std::move(ignorePaths),
-    std::move(ignoreGlobs),
-    backend
-  );
+  Runner *runner;
+  try {
+    runner = new Runner(
+      env,
+      info[0].As<String>().Utf8Value(),
+      info[1].As<Function>(),
+      std::move(ignorePaths),
+      std::move(ignoreGlobs),
+      backend
+    );
+  } catch (...) {
+    backend->releaseShared();
+    throw;
+  }
   return runner->queue();
 }
 
