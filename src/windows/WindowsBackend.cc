@@ -314,16 +314,21 @@ public:
             if (targetExisted) {
               mWatcher->mEvents.remove(*mPendingRenamePath);
               mWatcher->mEvents.create(path);
+              mTree->remove(*mPendingRenamePath);
               mTree->remove(path);
+              mTree->add(path, CONVERT_TIME(data.ftLastWriteTime), data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY);
             } else {
               mWatcher->mEvents.rename(
                 *mPendingRenamePath,
                 path,
                 "windows:" + std::to_string(++mRenameSequence)
               );
+              mTree->rename(*mPendingRenamePath, path);
+              if (mTree->update(path, CONVERT_TIME(data.ftLastWriteTime)) == nullptr) {
+                mTree->add(path, CONVERT_TIME(data.ftLastWriteTime), data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY);
+              }
             }
             mPendingRenamePath.reset();
-            mTree->add(path, CONVERT_TIME(data.ftLastWriteTime), data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY);
           } else {
             addPath(path);
           }
@@ -349,7 +354,6 @@ public:
       case FILE_ACTION_RENAMED_OLD_NAME:
         flushPendingRename();
         mPendingRenamePath = path;
-        mTree->remove(path);
         break;
     }
   }
@@ -401,6 +405,7 @@ public:
   void flushPendingRename() {
     if (mPendingRenamePath.has_value()) {
       mWatcher->mEvents.remove(*mPendingRenamePath);
+      mTree->remove(*mPendingRenamePath);
       mPendingRenamePath.reset();
     }
   }
