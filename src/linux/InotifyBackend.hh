@@ -46,8 +46,9 @@ public:
   void subscribe(WatcherRef watcher) override;
   void unsubscribe(WatcherRef watcher) override;
 private:
-  int mPipe[2];
-  int mInotify;
+  int mPipe[2] {-1, -1};
+  int mInotify = -1;
+  bool mLoopStarted = false;
   std::unordered_multimap<int, std::shared_ptr<InotifySubscription>> mSubscriptions;
   PendingInotifyMoves mPendingMoves;
   Signal mEndedSignal;
@@ -55,6 +56,7 @@ private:
   bool watchDir(WatcherRef watcher, std::string path, std::shared_ptr<DirTree> tree);
   bool addCreatedTree(WatcherRef watcher, const std::string &path, std::shared_ptr<DirTree> tree);
   void handleEvents();
+  void closeDescriptors();
   void handleOverflow(std::unordered_set<WatcherRef> &watchers);
   void flushExpiredMoves();
   void moveSubscriptions(Watcher *watcher, const std::string &oldPath, const std::string &newPath);

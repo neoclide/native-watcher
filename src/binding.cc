@@ -58,7 +58,12 @@ std::shared_ptr<Backend> getBackend(Env env, Value opts) {
     backendName = std::string(b.As<String>().Utf8Value().c_str());
   }
 
-  return Backend::getShared(backendName);
+  try {
+    return Backend::getShared(backendName);
+  } catch (const std::exception &error) {
+    Error::New(env, error.what()).ThrowAsJavaScriptException();
+    return nullptr;
+  }
 }
 
 class SubscribeRunner : public PromiseRunner {
@@ -195,6 +200,9 @@ Value queueSubscriptionWork(const CallbackInfo& info) {
   }
 
   auto backend = getBackend(env, info[2]);
+  if (!backend) {
+    return env.Null();
+  }
   Runner *runner;
   try {
     runner = new Runner(

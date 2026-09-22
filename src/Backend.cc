@@ -88,17 +88,35 @@ void Backend::run() {
     try {
       start();
     } catch (std::exception &err) {
+      notifyStartupFailed(err.what());
       handleError(err);
     }
   });
 
-  if (mThread.joinable()) {
-    mStartedSignal.wait();
+  std::unique_lock<std::mutex> lock(mStartupMutex);
+  mStartupCondition.wait(lock, [this] () {
+    return mStartupComplete;
+  });
+  if (!mStartupError.empty()) {
+    throw std::runtime_error(mStartupError);
   }
 }
 
 void Backend::notifyStarted() {
-  mStartedSignal.notify();
+  std::unique_lock<std::mutex> lock(mStartupMutex);
+  if (!mStartupComplete) {
+    mStartupComplete = true;
+    mStartupCondition.notify_all();
+  }
+}
+
+void Backend::notifyStartupFailed(const std::string &error) {
+  std::unique_lock<std::mutex> lock(mStartupMutex);
+  if (!mStartupComplete) {
+    mStartupError = error;
+    mStartupComplete = true;
+    mStartupCondition.notify_all();
+  }
 }
 
 void Backend::start() {

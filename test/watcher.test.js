@@ -312,6 +312,30 @@ test('serializes concurrent subscription registry access', async () => {
 });
 
 test(
+  'rejects when the inotify backend cannot initialize',
+  {skip: process.platform !== 'linux'},
+  async () => {
+    const fixture = path.join(
+      __dirname,
+      'fixtures',
+      'inotify-startup-failure.js',
+    );
+    const {stdout} = await execFileAsync(
+      '/bin/sh',
+      [
+        '-c',
+        'ulimit -n 64; exec "$1" "$2"',
+        'native-watcher-inotify-test',
+        process.execPath,
+        fixture,
+      ],
+      {timeout: 5000},
+    );
+    assert.match(stdout, /inotify startup failure handled/);
+  },
+);
+
+test(
   'waits for pending Windows directory reads before unsubscribe resolves',
   {skip: process.platform !== 'win32'},
   async () => {

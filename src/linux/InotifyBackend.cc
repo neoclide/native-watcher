@@ -37,7 +37,9 @@ void InotifyBackend::start() {
   // Init inotify file descriptor.
   mInotify = inotify_init1(IN_NONBLOCK | IN_CLOEXEC);
   if (mInotify == -1) {
-    throw std::runtime_error(std::string("Unable to initialize inotify: ") + strerror(errno));
+    int error = errno;
+    closeDescriptors();
+    throw std::runtime_error(std::string("Unable to initialize inotify: ") + strerror(error));
   }
 
   pollfd pollfds[2];
@@ -48,36 +50,57 @@ void InotifyBackend::start() {
   pollfds[1].events = POLLIN;
   pollfds[1].revents = 0;
 
+  mLoopStarted = true;
   notifyStarted();
 
-  // Loop until we get an event from the pipe.
-  while (true) {
-    int result = poll(pollfds, 2, MOVE_PAIR_GRACE_MS);
-    if (result < 0) {
-      throw std::runtime_error(std::string("Unable to poll: ") + strerror(errno));
-    }
+  try {
+    // Loop until we get an event from the pipe.
+    while (true) {
+      int result = poll(pollfds, 2, MOVE_PAIR_GRACE_MS);
+      if (result < 0) {
+        throw std::runtime_error(std::string("Unable to poll: ") + strerror(errno));
+      }
 
-    if (pollfds[0].revents) {
-      break;
-    }
+      if (pollfds[0].revents) {
+        break;
+      }
 
-    if (pollfds[1].revents) {
-      handleEvents();
-    }
+      if (pollfds[1].revents) {
+        handleEvents();
+      }
 
-    flushExpiredMoves();
+      flushExpiredMoves();
+    }
+  } catch (...) {
+    closeDescriptors();
+    mEndedSignal.notify();
+    throw;
   }
 
-  close(mPipe[0]);
-  close(mPipe[1]);
-  close(mInotify);
-
+  closeDescriptors();
   mEndedSignal.notify();
 }
 
 InotifyBackend::~InotifyBackend() {
-  write(mPipe[1], "X", 1);
-  mEndedSignal.wait();
+  if (mLoopStarted) {
+    write(mPipe[1], "X", 1);
+    mEndedSignal.wait();
+  }
+}
+
+void InotifyBackend::closeDescriptors() {
+  if (mPipe[0] != -1) {
+    close(mPipe[0]);
+    mPipe[0] = -1;
+  }
+  if (mPipe[1] != -1) {
+    close(mPipe[1]);
+    mPipe[1] = -1;
+  }
+  if (mInotify != -1) {
+    close(mInotify);
+    mInotify = -1;
+  }
 }
 
 // This function is called by Backend::watch which takes a lock on mMutex

@@ -3,8 +3,8 @@
 
 #include "Event.hh"
 #include "Watcher.hh"
-#include "Signal.hh"
 #include <atomic>
+#include <condition_variable>
 #include <thread>
 
 class Backend {
@@ -31,9 +31,13 @@ public:
 private:
   std::unordered_set<WatcherRef> mSubscriptions;
   std::atomic<size_t> mSharedReservations {0};
-  Signal mStartedSignal;
+  std::mutex mStartupMutex;
+  std::condition_variable mStartupCondition;
+  bool mStartupComplete = false;
+  std::string mStartupError;
 
   void handleError(std::exception &err);
+  void notifyStartupFailed(const std::string &error);
 };
 
 #endif
