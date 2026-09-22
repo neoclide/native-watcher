@@ -327,3 +327,51 @@ test(
     assert.equal(removed.renameId, undefined);
   },
 );
+
+test(
+  'removes macOS identities for every descendant of a deleted directory',
+  {skip: process.platform !== 'darwin'},
+  async (t) => {
+    const tempDirectory = await fs.realpath(os.tmpdir());
+    const directory = await fs.mkdtemp(path.join(tempDirectory, 'native-watcher-'));
+    const pending = [];
+    const subscription = await watcher.subscribe(directory, (error, events) => {
+      dispatchEvents(pending, error, events);
+    });
+
+    t.after(async () => {
+      await subscription.unsubscribe();
+      await fs.rm(directory, {recursive: true, force: true});
+    });
+
+    const subtree = path.join(directory, 'subtree');
+    const nestedDirectory = path.join(subtree, 'nested');
+    const nestedFile = path.join(nestedDirectory, 'file.txt');
+    let eventsPromise = waitForEvents(pending, (events) =>
+      containsEvent(events, 'create', nestedFile),
+    );
+    await fs.mkdir(nestedDirectory, {recursive: true});
+    await fs.writeFile(nestedFile, 'first');
+    await eventsPromise;
+
+    eventsPromise = waitForEvents(pending, (events) =>
+      containsEvent(events, 'delete', subtree),
+    );
+    await fs.rm(subtree, {recursive: true});
+    await eventsPromise;
+
+    eventsPromise = waitForEvents(pending, (events) =>
+      containsEvent(events, 'create', nestedFile),
+    );
+    await fs.mkdir(nestedDirectory, {recursive: true});
+    await fs.writeFile(nestedFile, 'second');
+    await eventsPromise;
+
+    const renamedFile = path.join(nestedDirectory, 'renamed.txt');
+    eventsPromise = waitForEvents(pending, (events) =>
+      containsRename(events, nestedFile, renamedFile),
+    );
+    await fs.rename(nestedFile, renamedFile);
+    assertRename(await eventsPromise, nestedFile, renamedFile);
+  },
+);

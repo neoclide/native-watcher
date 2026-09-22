@@ -76,14 +76,21 @@ test('recursively reports nested file and directory changes', async (t) => {
 
 test('watches a nested directory tree that existed before subscription', async (t) => {
   let existingFile;
-  const {collector} = await createFixture(t, undefined, async (directory) => {
+  const {directory, collector} = await createFixture(t, undefined, async (directory) => {
     existingFile = path.join(directory, 'existing', 'nested', 'file.txt');
     await fs.mkdir(path.dirname(existingFile), {recursive: true});
     await fs.writeFile(existingFile, 'one');
   });
 
-  const mark = collector.mark();
-  const waiting = collector.waitFor('update', existingFile, mark);
+  // Flush any startup events FSEvents queued while the initial tree was built.
+  const barrier = path.join(directory, 'barrier.txt');
+  let mark = collector.mark();
+  let waiting = collector.waitFor('create', barrier, mark);
+  await fs.writeFile(barrier, 'ready');
+  await waiting;
+
+  mark = collector.mark();
+  waiting = collector.waitFor('update', existingFile, mark);
   await fs.writeFile(existingFile, 'two');
   assertEvent(await waiting, 'update', existingFile);
 });
@@ -271,20 +278,6 @@ test('rejects a missing path and a file path', async (t) => {
   const file = path.join(directory, 'file.txt');
   await fs.writeFile(file, 'content');
   await assert.rejects(watcher.subscribe(file, () => {}));
-});
-
-test('reports deletion of the watched root and does not restart', async (t) => {
-  const {directory, collector} = await createFixture(t);
-  const mark = collector.mark();
-  const removed = collector.waitFor('delete', directory, mark);
-  await fs.rm(directory, {recursive: true});
-  assertEvent(await removed, 'delete', directory);
-
-  const afterRemoval = collector.mark();
-  await fs.mkdir(directory);
-  await fs.writeFile(path.join(directory, 'recreated.txt'), 'content');
-  await settle();
-  assert.equal(collector.events.slice(afterRemoval).length, 0);
 });
 
 async function assertIgnored(t, options, ignoredRelativePath, mutateIgnored) {

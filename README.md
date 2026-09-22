@@ -118,9 +118,7 @@ update followed by deletion can be delivered as one `delete`.
 Moving a populated directory into the watched tree reports `create` for the
 directory and all existing descendants. The addon also starts watching every
 new subdirectory; on macOS the full subtree is added to the identity index so an
-immediate rename of an existing child can be correlated. Deleting the watched
-root reports its deletion and ends the native watch; recreating the path does
-not restart the subscription.
+immediate rename of an existing child can be correlated.
 
 ### Rename correlation
 

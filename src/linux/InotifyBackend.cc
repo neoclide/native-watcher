@@ -1,14 +1,10 @@
 #include <memory>
+#include <cstring>
 #include <poll.h>
 #include <unistd.h>
 #include <fcntl.h>
 #include <sys/stat.h>
-
-#ifdef __THROW
-#undef __THROW
-#endif
-#define __THROW
-#include <fts.h>
+#include <dirent.h>
 #include "InotifyBackend.hh"
 
 #define INOTIFY_MASK \
@@ -107,36 +103,32 @@ bool InotifyBackend::addCreatedTree(
   const std::string &path,
   std::shared_ptr<DirTree> tree
 ) {
-  char *paths[2] {const_cast<char *>(path.c_str()), nullptr};
-  FTS *fts = fts_open(paths, FTS_NOCHDIR | FTS_PHYSICAL, nullptr);
-  if (fts == nullptr) return false;
+  DIR *directory = opendir(path.c_str());
+  if (directory == nullptr) return false;
 
-  bool isRoot = true;
-  FTSENT *node;
-  while ((node = fts_read(fts)) != nullptr) {
-    if (node->fts_info == FTS_DP) continue;
-    if (node->fts_errno != 0) {
-      fts_close(fts);
-      return false;
-    }
-
-    std::string candidate(node->fts_path);
-    if (!isRoot && watcher->isIgnored(candidate)) {
-      if (node->fts_info == FTS_D) fts_set(fts, node, FTS_SKIP);
+  while (dirent *item = readdir(directory)) {
+    if (strcmp(item->d_name, ".") == 0 || strcmp(item->d_name, "..") == 0) {
       continue;
     }
 
-    bool isDirectory = node->fts_info == FTS_D;
-    tree->add(candidate, CONVERT_TIME(node->fts_statp->st_mtim), isDirectory);
-    if (!isRoot) watcher->mEvents.create(candidate);
-    if (isDirectory && !isRoot && !watchDir(watcher, candidate, tree)) {
-      fts_close(fts);
+    std::string candidate = path + "/" + item->d_name;
+    if (watcher->isIgnored(candidate)) continue;
+
+    struct stat attributes;
+    if (lstat(candidate.c_str(), &attributes) != 0) continue;
+    bool isDirectory = S_ISDIR(attributes.st_mode);
+    tree->add(candidate, CONVERT_TIME(attributes.st_mtim), isDirectory);
+    watcher->mEvents.create(candidate);
+
+    if (isDirectory &&
+        (!watchDir(watcher, candidate, tree) ||
+         !addCreatedTree(watcher, candidate, tree))) {
+      closedir(directory);
       return false;
     }
-    isRoot = false;
   }
 
-  fts_close(fts);
+  closedir(directory);
   return true;
 }
 
