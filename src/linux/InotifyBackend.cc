@@ -10,6 +10,7 @@
   IN_DELETE_SELF | IN_MODIFY | IN_MOVE_SELF | IN_MOVED_FROM | \
   IN_MOVED_TO | IN_DONT_FOLLOW | IN_ONLYDIR | IN_EXCL_UNLINK
 #define BUFFER_SIZE 8192
+#define MOVE_PAIR_GRACE_MS 100
 #define CONVERT_TIME(ts) ((uint64_t)ts.tv_sec * 1000000000 + ts.tv_nsec)
 
 void InotifyBackend::start() {
@@ -37,7 +38,7 @@ void InotifyBackend::start() {
 
   // Loop until we get an event from the pipe.
   while (true) {
-    int result = poll(pollfds, 2, 500);
+    int result = poll(pollfds, 2, MOVE_PAIR_GRACE_MS);
     if (result < 0) {
       throw std::runtime_error(std::string("Unable to poll: ") + strerror(errno));
     }
@@ -49,6 +50,8 @@ void InotifyBackend::start() {
     if (pollfds[1].revents) {
       handleEvents();
     }
+
+    flushExpiredMoves();
   }
 
   close(mPipe[0]);
@@ -99,8 +102,6 @@ void InotifyBackend::handleEvents() {
 
   // Track all of the watchers that are touched so we can notify them at the end of the events.
   std::unordered_set<WatcherRef> watchers;
-  PendingInotifyMoves pendingMoves;
-
   while (true) {
     int n = read(mInotify, &buf, BUFFER_SIZE);
     if (n < 0) {
@@ -123,20 +124,36 @@ void InotifyBackend::handleEvents() {
         continue;
       }
 
-      handleEvent(event, watchers, pendingMoves);
+      handleEvent(event, watchers, mPendingMoves);
     }
-  }
-
-  // A move without a matching destination left the watched root. Preserve the
-  // Parcel delete behavior, but do not attach a rename id without both sides.
-  for (auto &entry : pendingMoves) {
-    entry.second.watcher->mEvents.remove(entry.second.path);
-    watchers.insert(entry.second.watcher);
   }
 
   for (auto it = watchers.begin(); it != watchers.end(); it++) {
     (*it)->notify();
   }
+}
+
+void InotifyBackend::flushExpiredMoves() {
+  std::unordered_set<WatcherRef> watchers;
+  auto now = std::chrono::steady_clock::now();
+  std::unique_lock<std::mutex> lock(mMutex);
+
+  for (auto it = mPendingMoves.begin(); it != mPendingMoves.end();) {
+    auto age = std::chrono::duration_cast<std::chrono::milliseconds>(
+      now - it->second.createdAt
+    );
+    if (age.count() < MOVE_PAIR_GRACE_MS) {
+      ++it;
+      continue;
+    }
+
+    it->second.watcher->mEvents.remove(it->second.path);
+    watchers.insert(it->second.watcher);
+    it = mPendingMoves.erase(it);
+  }
+
+  lock.unlock();
+  for (const auto &watcher : watchers) watcher->notify();
 }
 
 void InotifyBackend::handleEvent(struct inotify_event *event, std::unordered_set<WatcherRef> &watchers, PendingInotifyMoves &pendingMoves) {
@@ -228,7 +245,10 @@ bool InotifyBackend::handleSubscription(struct inotify_event *event, std::shared
     }
 
     if ((event->mask & IN_MOVED_FROM) && event->cookie != 0) {
-      pendingMoves.insert_or_assign({watcher.get(), event->cookie}, PendingInotifyMove {watcher, path});
+      pendingMoves.insert_or_assign(
+        {watcher.get(), event->cookie},
+        PendingInotifyMove {watcher, path, std::chrono::steady_clock::now()}
+      );
     } else {
       watcher->mEvents.remove(path);
     }
@@ -240,6 +260,14 @@ bool InotifyBackend::handleSubscription(struct inotify_event *event, std::shared
 
 // This function is called by Backend::unwatch which takes a lock on mMutex
 void InotifyBackend::unsubscribe(WatcherRef watcher) {
+  for (auto it = mPendingMoves.begin(); it != mPendingMoves.end();) {
+    if (it->second.watcher.get() == watcher.get()) {
+      it = mPendingMoves.erase(it);
+    } else {
+      ++it;
+    }
+  }
+
   // Find any subscriptions pointing to this watcher, and remove them.
   for (auto it = mSubscriptions.begin(); it != mSubscriptions.end();) {
     if (it->second->watcher.get() == watcher.get()) {

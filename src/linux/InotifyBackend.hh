@@ -2,6 +2,7 @@
 #define INOTIFY_H
 
 #include <unordered_map>
+#include <chrono>
 #include <sys/inotify.h>
 #include "../shared/BruteForceBackend.hh"
 #include "../DirTree.hh"
@@ -31,6 +32,7 @@ struct InotifyMoveKeyHash {
 struct PendingInotifyMove {
   WatcherRef watcher;
   std::string path;
+  std::chrono::steady_clock::time_point createdAt;
 };
 
 using PendingInotifyMoves = std::unordered_map<InotifyMoveKey, PendingInotifyMove, InotifyMoveKeyHash>;
@@ -45,10 +47,12 @@ private:
   int mPipe[2];
   int mInotify;
   std::unordered_multimap<int, std::shared_ptr<InotifySubscription>> mSubscriptions;
+  PendingInotifyMoves mPendingMoves;
   Signal mEndedSignal;
 
   bool watchDir(WatcherRef watcher, std::string path, std::shared_ptr<DirTree> tree);
   void handleEvents();
+  void flushExpiredMoves();
   void handleEvent(struct inotify_event *event, std::unordered_set<WatcherRef> &watchers, PendingInotifyMoves &pendingMoves);
   bool handleSubscription(struct inotify_event *event, std::shared_ptr<InotifySubscription> sub, PendingInotifyMoves &pendingMoves);
 };
