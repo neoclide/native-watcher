@@ -60,16 +60,21 @@ exports.createWrapper = (binding) => ({
     const nativeCallback = (error, events) => callback(error, events);
     await binding.subscribe(watchedDirectory, nativeCallback, nativeOptions);
 
-    let active = true;
+    let unsubscribePromise;
     return {
-      async unsubscribe() {
-        if (!active) return;
-        active = false;
-        await binding.unsubscribe(
-          watchedDirectory,
-          nativeCallback,
-          nativeOptions,
-        );
+      unsubscribe() {
+        if (!unsubscribePromise) {
+          try {
+            unsubscribePromise = Promise.resolve(binding.unsubscribe(
+              watchedDirectory,
+              nativeCallback,
+              nativeOptions,
+            ));
+          } catch (error) {
+            unsubscribePromise = Promise.reject(error);
+          }
+        }
+        return unsubscribePromise;
       },
     };
   },

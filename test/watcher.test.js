@@ -370,7 +370,7 @@ test(
   },
 );
 
-test('stops watching every descendant of a directory moved out of the root', async () => {
+test('does not report changes below a directory immediately moved out of the root', async () => {
   const tempRoot = await fs.realpath(os.tmpdir());
   const parent = await fs.mkdtemp(path.join(tempRoot, 'native-watcher-move-out-'));
   const directory = path.join(parent, 'watched');
@@ -378,28 +378,36 @@ test('stops watching every descendant of a directory moved out of the root', asy
   const oldChild = path.join(oldRoot, 'nested', 'existing');
   const outsideRoot = path.join(parent, 'outside');
   const outsideChild = path.join(outsideRoot, 'nested', 'existing');
+  const outsideCreated = path.join(outsideRoot, 'nested', 'created');
   await fs.mkdir(path.dirname(oldChild), {recursive: true});
   await fs.writeFile(oldChild, 'before');
   const collector = new EventCollector();
   const subscription = await watcher.subscribe(directory, collector.callback);
 
   try {
-    let mark = collector.mark();
-    let observed = collector.waitFor('delete', oldRoot, mark);
-    await fs.rename(oldRoot, outsideRoot);
-    await observed;
-
-    mark = collector.mark();
+    const mark = collector.mark();
     const marker = path.join(directory, 'delivery-marker');
-    observed = collector.waitFor('create', marker, mark);
+    const observed = collector.waitFrom(mark, (events) =>
+      events.some((event) => event.type === 'delete' && event.path === oldRoot) &&
+      events.some((event) => event.type === 'create' && event.path === marker),
+    );
+    await fs.rename(oldRoot, outsideRoot);
     await fs.appendFile(outsideChild, 'after');
+    await fs.writeFile(outsideCreated, 'after');
     await fs.writeFile(marker, 'marker');
     await observed;
-    await settle();
 
     const events = collector.events.slice(mark);
-    assert.ok(events.every((event) => event.path !== oldChild));
-    assert.ok(events.every((event) => event.path !== outsideChild));
+    assert.ok(
+      events.every((event) =>
+        event.type === 'delete' ||
+        (event.path !== oldChild &&
+          event.path !== path.join(oldRoot, 'nested', 'created')),
+      ),
+      `received a stale event below the moved directory: ${JSON.stringify(events)}`,
+    );
+    assertNoPath(events, outsideChild);
+    assertNoPath(events, outsideCreated);
   } finally {
     await subscription.unsubscribe();
     await fs.rm(parent, {recursive: true, force: true});
@@ -1227,6 +1235,42 @@ test('an ignored directory present at startup is not watched', async (t) => {
   await settle();
   assertNoPath(collector.events.slice(mark), ignoredDirectory);
 });
+
+test(
+  'path ignores use the filesystem casing for existing and new directories',
+  {skip: !['darwin', 'win32'].includes(process.platform)},
+  async (t) => {
+    const {directory, collector} = await createFixture(
+      t,
+      {ignore: ['EXISTING', 'LATER']},
+      async (root) => {
+        const existing = path.join(root, 'existing');
+        await fs.mkdir(existing);
+        await fs.writeFile(path.join(existing, 'child'), 'before');
+      },
+    );
+    const existing = path.join(directory, 'existing');
+    const later = path.join(directory, 'later');
+    // Some macOS volumes and Windows directories are case-sensitive.
+    try {
+      await fs.stat(path.join(directory, 'EXISTING'));
+    } catch (error) {
+      if (error.code === 'ENOENT') return;
+      throw error;
+    }
+
+    const mark = collector.mark();
+    const marker = path.join(directory, 'delivery-marker');
+    const observed = collector.waitFor('create', marker, mark);
+    await fs.appendFile(path.join(existing, 'child'), 'ignored');
+    await fs.mkdir(later);
+    await fs.writeFile(path.join(later, 'child'), 'ignored');
+    await fs.writeFile(marker, 'visible');
+    const events = await observed;
+    assertNoPath(events, existing);
+    assertNoPath(events, later);
+  },
+);
 
 test('ignore accepts glob patterns relative to the watched directory', async (t) => {
   const {directory, collector} = await createFixture(t, {

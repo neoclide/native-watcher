@@ -1,6 +1,13 @@
+#ifdef FS_EVENTS
+#include <CoreFoundation/CoreFoundation.h>
+#endif
 #include "Watcher.hh"
 #include "Backend.hh"
+#include <filesystem>
 #include <unordered_set>
+#ifdef WINDOWS
+#include "windows/win_utils.hh"
+#endif
 
 using namespace Napi;
 
@@ -379,13 +386,97 @@ void Watcher::clearCallbacks() {
   mCallbacks.clear();
 }
 
+namespace {
+
+bool isPathOrDescendant(const std::string &path, const std::string &base) {
+  return path == base ||
+    (path.size() > base.size() &&
+     path.compare(0, base.size(), base) == 0 &&
+     path[base.size()] == DIR_SEP[0]);
+}
+
+bool equalIgnoringCase(const std::string &left, const std::string &right) {
+#ifdef FS_EVENTS
+  CFStringRef a = CFStringCreateWithBytes(
+    nullptr, reinterpret_cast<const UInt8 *>(left.data()), left.size(),
+    kCFStringEncodingUTF8, false
+  );
+  CFStringRef b = CFStringCreateWithBytes(
+    nullptr, reinterpret_cast<const UInt8 *>(right.data()), right.size(),
+    kCFStringEncodingUTF8, false
+  );
+  bool equal = a != nullptr && b != nullptr &&
+    CFStringCompare(a, b, kCFCompareCaseInsensitive | kCFCompareNonliteral) ==
+      kCFCompareEqualTo;
+  if (a != nullptr) CFRelease(a);
+  if (b != nullptr) CFRelease(b);
+  return equal;
+#elif defined(WINDOWS)
+  auto a = utf8ToUtf16(left);
+  auto b = utf8ToUtf16(right);
+  return CompareStringOrdinal(
+    a.c_str(), static_cast<int>(a.size()),
+    b.c_str(), static_cast<int>(b.size()), TRUE
+  ) == CSTR_EQUAL;
+#else
+  return left == right;
+#endif
+}
+
+bool refersToSameEntry(const std::string &left, const std::string &right) {
+  std::error_code error;
+  auto a = std::filesystem::u8path(left);
+  auto b = std::filesystem::u8path(right);
+  if (std::filesystem::is_symlink(std::filesystem::symlink_status(a, error)) ||
+      error) return false;
+  if (std::filesystem::is_symlink(std::filesystem::symlink_status(b, error)) ||
+      error) return false;
+  bool equivalent = std::filesystem::equivalent(a, b, error);
+  if (error || !equivalent) return false;
+#ifdef FS_EVENTS
+  // A case-sensitive volume can contain two hard links whose names differ
+  // only by case. Equal file identity alone must not turn them into aliases.
+  auto canonicalA = std::filesystem::canonical(a, error);
+  if (error) return false;
+  auto canonicalB = std::filesystem::canonical(b, error);
+  return !error && canonicalA == canonicalB;
+#else
+  return true;
+#endif
+}
+
+} // namespace
+
 bool Watcher::isIgnored(std::string path) {
-  for (auto it = mIgnorePaths.begin(); it != mIgnorePaths.end(); it++) {
-    auto dir = *it + DIR_SEP;
-    if (*it == path || path.compare(0, dir.size(), dir) == 0) {
-      return true;
+  for (const auto &ignored : mIgnorePaths) {
+    if (isPathOrDescendant(path, ignored)) return true;
+  }
+  {
+    std::lock_guard<std::mutex> lock(mIgnoreAliasesMutex);
+    for (const auto &alias : mIgnoreAliases) {
+      if (isPathOrDescendant(path, alias)) return true;
     }
   }
+
+#if defined(FS_EVENTS) || defined(WINDOWS)
+  // Compare complete path components before asking the filesystem whether
+  // differently cased spellings really identify the same entry. This keeps
+  // distinct names distinct on case-sensitive volumes.
+  for (const auto &ignored : mIgnorePaths) {
+    std::string ancestor = path;
+    while (!ancestor.empty()) {
+      if (equalIgnoringCase(ancestor, ignored) &&
+          refersToSameEntry(ancestor, ignored)) {
+        std::lock_guard<std::mutex> lock(mIgnoreAliasesMutex);
+        mIgnoreAliases.insert(ancestor);
+        return true;
+      }
+      size_t separator = ancestor.find_last_of(DIR_SEP);
+      if (separator == std::string::npos) break;
+      ancestor.resize(separator);
+    }
+  }
+#endif
 
   auto basePath = mDir + DIR_SEP;
 

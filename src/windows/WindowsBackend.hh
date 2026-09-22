@@ -14,7 +14,7 @@ public:
   void finishUnsubscribe(WatcherRef watcher, std::shared_ptr<WatcherState> state) override;
   bool isBackendThread() const;
 private:
-  bool mRunning;
+  std::atomic<bool> mRunning {false};
 };
 
 #endif

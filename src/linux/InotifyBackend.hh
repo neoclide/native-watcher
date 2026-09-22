@@ -37,6 +37,7 @@ struct PendingInotifyMove {
   std::vector<DirEntry> entries;
   std::vector<std::shared_ptr<InotifySubscription>> subscriptions;
   std::chrono::steady_clock::time_point createdAt;
+  bool suppressedEvents = false;
 };
 
 using PendingInotifyMoves = std::unordered_map<InotifyMoveKey, PendingInotifyMove, InotifyMoveKeyHash>;
@@ -57,6 +58,7 @@ private:
 
   bool watchDir(WatcherRef watcher, std::string path, std::shared_ptr<DirTree> tree);
   bool addCreatedTree(WatcherRef watcher, const std::string &path, std::shared_ptr<DirTree> tree, bool reportEvents = true);
+  bool reconcileMovedTree(WatcherRef watcher, const std::string &path, std::shared_ptr<DirTree> tree);
   void handleEvents();
   void closeDescriptors();
   void handleOverflow(std::unordered_set<WatcherRef> &watchers);

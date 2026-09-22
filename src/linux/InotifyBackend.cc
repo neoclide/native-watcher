@@ -220,6 +220,49 @@ bool InotifyBackend::addCreatedTree(
   return true;
 }
 
+bool InotifyBackend::reconcileMovedTree(
+  WatcherRef watcher,
+  const std::string &path,
+  std::shared_ptr<DirTree> tree
+) {
+  // Events from a directory in flight cannot safely use its old path. Build
+  // its final state at the destination, then report only the net changes.
+  auto previous = tree->extract(path);
+  if (!addCreatedTree(watcher, path, tree, false)) return false;
+
+  std::unordered_map<std::string, DirEntry> before;
+  for (auto &entry : previous) before.emplace(entry.path, entry);
+
+  for (const auto &current : tree->entries) {
+    if (!isPathOrDescendant(current.first, path)) continue;
+    auto old = before.find(current.first);
+    if (old == before.end()) {
+      watcher->mEvents.create(current.first);
+    } else {
+      if (old->second.isDir != current.second.isDir) {
+        if (old->second.isDir) {
+          removeSubscriptions(watcher.get(), old->first);
+        }
+        watcher->mEvents.update(current.first);
+      } else if (!current.second.isDir &&
+          old->second.mtime != current.second.mtime) {
+        watcher->mEvents.update(current.first);
+      }
+      before.erase(old);
+    }
+  }
+
+  for (const auto &old : before) {
+    if (!watcher->isIgnored(old.first)) {
+      watcher->mEvents.remove(old.first);
+    }
+    if (old.second.isDir) {
+      removeSubscriptions(watcher.get(), old.first);
+    }
+  }
+  return true;
+}
+
 void InotifyBackend::handleEvents() {
   char buf[BUFFER_SIZE] __attribute__ ((aligned(__alignof__(struct inotify_event))));;
   struct inotify_event *event;
@@ -397,6 +440,15 @@ bool InotifyBackend::handleSubscription(struct inotify_event *event, std::shared
     path += "/" + std::string(event->name);
   }
 
+  for (auto &pending : pendingMoves) {
+    auto &move = pending.second;
+    if (move.watcher.get() == watcher.get() && move.isDirectory &&
+        isPathOrDescendant(sub->path, move.path)) {
+      move.suppressedEvents = true;
+      return false;
+    }
+  }
+
   if (watcher->isIgnored(path)) {
     return false;
   }
@@ -417,11 +469,13 @@ bool InotifyBackend::handleSubscription(struct inotify_event *event, std::shared
 
     bool isMoveWithinRoot = pending != pendingMoves.end();
     bool missingSource = false;
+    bool suppressedEvents = false;
     std::string oldPath;
     PendingInotifyMove *move = nullptr;
     if (isMoveWithinRoot) {
       oldPath = pending->second.path;
       move = &pending->second;
+      suppressedEvents = move->suppressedEvents;
       bool targetExisted = sub->tree->find(path) != nullptr;
       if (targetExisted) {
         watcher->mEvents.remove(oldPath);
@@ -473,7 +527,9 @@ bool InotifyBackend::handleSubscription(struct inotify_event *event, std::shared
       );
       bool success = (isMoveWithinRoot && !missingSource) ||
         watchDir(watcher, path, sub->tree);
-      if (success && (!isMoveWithinRoot || rescanMovedTree)) {
+      if (success && suppressedEvents) {
+        success = reconcileMovedTree(watcher, path, sub->tree);
+      } else if (success && (!isMoveWithinRoot || rescanMovedTree)) {
         success = addCreatedTree(watcher, path, sub->tree);
       }
       if (!success) {

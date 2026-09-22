@@ -514,6 +514,17 @@ test(
     );
     assert.ok(removed);
     assert.equal(removed.renameId, undefined);
+
+    eventsPromise = waitForEvents(pending, (events) =>
+      containsEvent(events, 'create', inside),
+    );
+    await fs.rename(outside, inside);
+    const returnedEvents = await eventsPromise;
+    const created = returnedEvents.find(
+      (event) => event.type === 'create' && event.path === inside,
+    );
+    assert.ok(created);
+    assert.equal(created.renameId, undefined);
   },
 );
 

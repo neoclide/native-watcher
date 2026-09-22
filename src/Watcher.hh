@@ -73,6 +73,8 @@ private:
   std::vector<std::weak_ptr<Backend>> mBackends;
   std::shared_ptr<Debounce> mDebounce;
   std::atomic<size_t> mSharedReservations {0};
+  std::mutex mIgnoreAliasesMutex;
+  std::unordered_set<std::string> mIgnoreAliases;
 
   std::vector<Callback>::iterator findCallback(Function callback);
   void clearCallbacks();
