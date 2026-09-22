@@ -2,6 +2,8 @@
 
 std::shared_ptr<Debounce> Debounce::getShared() {
   static std::weak_ptr<Debounce> sharedInstance;
+  static std::mutex sharedMutex;
+  std::lock_guard<std::mutex> lock(sharedMutex);
   std::shared_ptr<Debounce> shared = sharedInstance.lock();
   if (!shared) {
     shared = std::make_shared<Debounce>();

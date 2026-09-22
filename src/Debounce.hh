@@ -2,6 +2,7 @@
 #define DEBOUNCE_H
 
 #include <thread>
+#include <atomic>
 #include <unordered_map>
 #include <functional>
 #include "Signal.hh"
@@ -22,7 +23,7 @@ public:
   void notify();
 
 private:
-  bool mRunning;
+  std::atomic<bool> mRunning;
   std::mutex mMutex;
   Signal mWaitSignal;
   std::thread mThread;
