@@ -69,6 +69,7 @@ struct PendingEvent {
 
 class State: public WatcherState {
 public:
+  FSEventsBackend *backend = nullptr;
   FSEventStreamRef stream = nullptr;
   std::shared_ptr<DirTree> tree;
   IdentityIndex identities;
@@ -410,6 +411,11 @@ void processEvents(
       hasFlag(event.flags, kFSEventStreamEventFlagItemFinderInfoMod) ||
       hasFlag(event.flags, kFSEventStreamEventFlagItemChangeOwner) ||
       hasFlag(event.flags, kFSEventStreamEventFlagItemXattrMod);
+    bool hasMetadataChange =
+      hasFlag(event.flags, kFSEventStreamEventFlagItemInodeMetaMod) ||
+      hasFlag(event.flags, kFSEventStreamEventFlagItemFinderInfoMod) ||
+      hasFlag(event.flags, kFSEventStreamEventFlagItemChangeOwner) ||
+      hasFlag(event.flags, kFSEventStreamEventFlagItemXattrMod);
     bool isRenamed = hasFlag(event.flags, kFSEventStreamEventFlagItemRenamed);
     bool isDone = hasFlag(event.flags, kFSEventStreamEventFlagHistoryDone);
     bool isDir = hasFlag(event.flags, kFSEventStreamEventFlagItemIsDir);
@@ -449,7 +455,7 @@ void processEvents(
       bool sameIdentity = previousIdentity != nullptr &&
         previousIdentity->identity == indexed->identity;
       DirEntry *entry = state->tree->find(event.path);
-      if (entry && sameIdentity && entry->mtime == indexed->mtime &&
+      if (!hasMetadataChange && entry && sameIdentity && entry->mtime == indexed->mtime &&
           indexed->mtime % 1000000000 != 0) {
         continue;
       }
@@ -480,7 +486,7 @@ void processEvents(
       bool sameIdentity = previousIdentity != nullptr &&
         previousIdentity->identity == indexed->identity;
       DirEntry *entry = state->tree->find(event.path);
-      if (entry && sameIdentity && entry->mtime == indexed->mtime &&
+      if (!hasMetadataChange && entry && sameIdentity && entry->mtime == indexed->mtime &&
           indexed->mtime % 1000000000 != 0) {
         continue;
       }
@@ -508,6 +514,7 @@ void processEvents(
 
   watcher->notify();
   if (deletedRoot) {
+    watcher->mNeedsResubscribe = true;
     stopStream((FSEventStreamRef)streamRef, CFRunLoopGetCurrent());
     watcher->state = nullptr;
   }
@@ -681,6 +688,10 @@ void FSEventsBackend::startStream(WatcherRef watcher, FSEventStreamEventId id) {
 void FSEventsBackend::start() {
   mRunLoop = CFRunLoopGetCurrent();
   CFRetain(mRunLoop);
+  CFRunLoopSourceContext context = {};
+  context.perform = [](void *) {};
+  mKeepAliveSource = CFRunLoopSourceCreate(nullptr, 0, &context);
+  CFRunLoopAddSource(mRunLoop, mKeepAliveSource, kCFRunLoopDefaultMode);
 
   // Unlock once run loop has started.
   CFRunLoopPerformBlock(mRunLoop, kCFRunLoopDefaultMode, ^ {
@@ -694,12 +705,23 @@ void FSEventsBackend::start() {
 FSEventsBackend::~FSEventsBackend() {
   std::unique_lock<std::mutex> lock(mMutex);
   CFRunLoopStop(mRunLoop);
+  CFRunLoopSourceInvalidate(mKeepAliveSource);
+  CFRelease(mKeepAliveSource);
   CFRelease(mRunLoop);
+}
+
+// Backend::handleError holds mMutex while retiring the failed backend.
+void FSEventsBackend::cleanupAfterError() {
+  for (const auto &watcher : mSubscriptions) {
+    auto state = std::static_pointer_cast<State>(watcher->state);
+    if (state != nullptr && state->backend == this) unsubscribe(watcher);
+  }
 }
 
 // This function is called by Backend::watch which takes a lock on mMutex
 void FSEventsBackend::subscribe(WatcherRef watcher) {
   auto s = std::make_shared<State>();
+  s->backend = this;
   watcher->state = s;
   try {
     startStream(watcher, kFSEventStreamEventIdSinceNow);

@@ -10,9 +10,11 @@ public:
   ~FSEventsBackend();
   void subscribe(WatcherRef watcher) override;
   void unsubscribe(WatcherRef watcher) override;
+  void cleanupAfterError() override;
 private:
   void startStream(WatcherRef watcher, FSEventStreamEventId id);
-  CFRunLoopRef mRunLoop;
+  CFRunLoopRef mRunLoop = nullptr;
+  CFRunLoopSourceRef mKeepAliveSource = nullptr;
 };
 
 #endif

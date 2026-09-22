@@ -92,6 +92,8 @@ void Backend::run() {
     try {
       start();
     } catch (std::exception &err) {
+      // Keep this instance alive while removing it from the shared registry.
+      auto self = shared_from_this();
       notifyStartupFailed(err.what());
       handleError(err);
     }
@@ -143,7 +145,9 @@ void Backend::watch(WatcherRef watcher) {
   std::unique_lock<std::mutex> lock(mMutex);
   auto res = mSubscriptions.find(watcher);
   bool isNew = res == mSubscriptions.end();
-  bool wasInvalid = !isNew && mInvalidSubscriptions.erase(watcher) > 0;
+  bool needsResubscribe = watcher->mNeedsResubscribe.exchange(false);
+  bool wasInvalid = !isNew &&
+    (mInvalidSubscriptions.erase(watcher) > 0 || needsResubscribe);
   if (isNew || wasInvalid) {
     try {
       this->subscribe(watcher);
@@ -167,6 +171,7 @@ void Backend::unwatch(WatcherRef watcher, bool force) {
   size_t deleted = mSubscriptions.erase(watcher);
   bool wasInvalid = mInvalidSubscriptions.erase(watcher) > 0;
   if (deleted > 0) {
+    auto state = watcher->state;
     try {
       this->unsubscribe(watcher);
     } catch (...) {
@@ -177,7 +182,7 @@ void Backend::unwatch(WatcherRef watcher, bool force) {
       throw;
     }
     lock.unlock();
-    this->finishUnsubscribe(watcher);
+    this->finishUnsubscribe(watcher, state);
     lock.lock();
     watcher->removeBackend(this);
     unref();
@@ -211,9 +216,12 @@ void Backend::handleWatcherError(WatcherError &err) {
 }
 
 void Backend::handleError(std::exception &err) {
-  std::unique_lock<std::mutex> lock(mMutex);
-  for (auto it = mSubscriptions.begin(); it != mSubscriptions.end(); it++) {
-    (*it)->notifyError(err);
+  {
+    std::unique_lock<std::mutex> lock(mMutex);
+    for (auto it = mSubscriptions.begin(); it != mSubscriptions.end(); it++) {
+      (*it)->notifyError(err);
+    }
+    cleanupAfterError();
   }
 
   removeShared(this);

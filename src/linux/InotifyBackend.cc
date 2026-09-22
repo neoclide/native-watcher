@@ -105,18 +105,19 @@ void InotifyBackend::closeDescriptors() {
 
 // This function is called by Backend::watch which takes a lock on mMutex
 void InotifyBackend::subscribe(WatcherRef watcher) {
-  // Build a full directory tree recursively, and watch each directory.
-  std::shared_ptr<DirTree> tree = getTree(watcher);
+  // Install each directory watch before scanning its entries. Changes made
+  // during the scan remain queued until Backend::watch releases mMutex.
+  std::shared_ptr<DirTree> tree = getTree(watcher, false);
 
   try {
-    for (auto it = tree->entries.begin(); it != tree->entries.end(); it++) {
-      if (it->second.isDir) {
-        bool success = watchDir(watcher, it->second.path, tree);
-        if (!success) {
-          throw WatcherError(std::string("inotify_add_watch on '") + it->second.path + std::string("' failed: ") + strerror(errno), watcher);
-        }
-      }
+    if (!watchDir(watcher, watcher->mDir, tree) ||
+        !addCreatedTree(watcher, watcher->mDir, tree, false)) {
+      throw WatcherError(
+        std::string("Unable to watch '") + watcher->mDir +
+        "': " + strerror(errno), watcher
+      );
     }
+    tree->isComplete = true;
   } catch (...) {
     removeSubscriptions(watcher.get(), watcher->mDir);
     throw;
@@ -166,10 +167,20 @@ bool InotifyBackend::watchDir(WatcherRef watcher, std::string path, std::shared_
 bool InotifyBackend::addCreatedTree(
   WatcherRef watcher,
   const std::string &path,
-  std::shared_ptr<DirTree> tree
+  std::shared_ptr<DirTree> tree,
+  bool reportEvents
 ) {
   DIR *directory = opendir(path.c_str());
   if (directory == nullptr) return false;
+
+  if (tree->find(path) == nullptr) {
+    struct stat attributes;
+    if (fstat(dirfd(directory), &attributes) != 0) {
+      closedir(directory);
+      return false;
+    }
+    tree->add(path, CONVERT_TIME(attributes.st_mtim), true);
+  }
 
   while (dirent *item = readdir(directory)) {
     if (strcmp(item->d_name, ".") == 0 || strcmp(item->d_name, "..") == 0) {
@@ -185,12 +196,12 @@ bool InotifyBackend::addCreatedTree(
     bool existed = tree->find(candidate) != nullptr;
     if (!existed) {
       tree->add(candidate, CONVERT_TIME(attributes.st_mtim), isDirectory);
-      watcher->mEvents.create(candidate);
+      if (reportEvents) watcher->mEvents.create(candidate);
     }
 
     if (isDirectory &&
         (!watchDir(watcher, candidate, tree) ||
-         !addCreatedTree(watcher, candidate, tree))) {
+         !addCreatedTree(watcher, candidate, tree, reportEvents))) {
       closedir(directory);
       return false;
     }
@@ -381,6 +392,12 @@ bool InotifyBackend::handleSubscription(struct inotify_event *event, std::shared
     return false;
   }
 
+  if (path == watcher->mDir && (event->mask & IN_IGNORED)) {
+    invalidate(watcher);
+    removeSubscriptions(watcher.get(), watcher->mDir);
+    return false;
+  }
+
   // If this is a create, check if it's a directory and start watching if it is.
   // In any case, keep the directory tree up to date.
   if (event->mask & (IN_CREATE | IN_MOVED_TO)) {
@@ -502,6 +519,7 @@ bool InotifyBackend::handleSubscription(struct inotify_event *event, std::shared
       watcher->mEvents.remove(path);
       sub->tree->remove(path);
       if (isSelfEvent || isDir) {
+        if (isSelfEvent && path == watcher->mDir) invalidate(watcher);
         removeSubscriptions(watcher.get(), path);
       }
     }

@@ -690,6 +690,20 @@ test('serializes concurrent subscription registry access', async () => {
 });
 
 test(
+  'recovers macOS subscriptions after their watched root is deleted',
+  {skip: process.platform !== 'darwin'},
+  async () => {
+    const fixture = path.join(__dirname, 'fixtures', 'macos-root-recovery.js');
+    for (const mode of ['different-options', 'same-options']) {
+      const {stdout} = await execFileAsync(process.execPath, [fixture, mode], {
+        timeout: 9000,
+      });
+      assert.match(stdout, /macOS root recovery ok/);
+    }
+  },
+);
+
+test(
   'rejects when the inotify backend cannot initialize',
   {skip: process.platform !== 'linux'},
   async () => {
@@ -963,6 +977,66 @@ test(
 );
 
 test(
+  'filters descendants of directories matched by macOS ignore patterns',
+  {skip: process.platform !== 'darwin'},
+  async (t) => {
+    for (const ignore of [['ignored*'], [/^ignored-dir$/]]) {
+      let ignoredFile;
+      const {directory, collector} = await createFixture(
+        t,
+        {ignore},
+        async (root) => {
+          const ignoredDirectory = path.join(root, 'ignored-dir');
+          ignoredFile = path.join(ignoredDirectory, 'child.txt');
+          await fs.mkdir(ignoredDirectory);
+        },
+      );
+      const mark = collector.mark();
+      const visible = path.join(directory, 'visible.txt');
+      const observed = collector.waitFor('create', visible, mark);
+      await fs.writeFile(ignoredFile, 'ignored');
+      await fs.writeFile(visible, 'visible');
+      await observed;
+      await settle();
+      assertNoPath(collector.events.slice(mark), path.dirname(ignoredFile));
+    }
+  },
+);
+
+test(
+  'reports macOS updates caused only by file metadata changes',
+  {skip: process.platform !== 'darwin'},
+  async (t) => {
+    let file;
+    const {directory, collector} = await createFixture(
+      t,
+      undefined,
+      async (root) => {
+        file = path.join(root, 'metadata.txt');
+        await fs.writeFile(file, 'content', {mode: 0o600});
+      },
+    );
+
+    // Establish that startup notifications have drained before metadata-only
+    // changes, so an earlier create cannot satisfy the update assertion.
+    const barrier = path.join(directory, 'metadata-barrier');
+    let mark = collector.mark();
+    let observed = collector.waitFor('create', barrier, mark);
+    await fs.writeFile(barrier, 'ready');
+    await observed;
+
+    mark = collector.mark();
+    observed = collector.waitFor('update', file, mark);
+    await fs.chmod(file, 0o644);
+    await observed;
+
+    mark = collector.mark();
+    await execFileAsync('/usr/bin/xattr', ['-w', 'native-watcher-test', 'value', file]);
+    await collector.waitFor('update', file, mark);
+  },
+);
+
+test(
   'releases macOS stream resources across repeated subscriptions',
   {skip: process.platform !== 'darwin'},
   async () => {
@@ -1224,7 +1298,7 @@ test('invalid native RegExp syntax does not leave a subscription running', async
   const {stdout} = await execFileAsync(process.execPath, [fixture], {
     timeout: 5000,
   });
-  assert.match(stdout, /invalid regex rejected cleanly/);
+  assert.match(stdout, /runtime regex failure cleanup ok/);
 });
 
 test('a move across an ignore boundary is not reported as a rename pair', async (t) => {

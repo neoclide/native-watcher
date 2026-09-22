@@ -7,7 +7,7 @@
 #include <condition_variable>
 #include <thread>
 
-class Backend {
+class Backend : public std::enable_shared_from_this<Backend> {
 public:
   virtual ~Backend();
   void run();
@@ -16,7 +16,8 @@ public:
   virtual void start();
   virtual void subscribe(WatcherRef watcher) = 0;
   virtual void unsubscribe(WatcherRef watcher) = 0;
-  virtual void finishUnsubscribe(WatcherRef watcher) {}
+  virtual void finishUnsubscribe(WatcherRef watcher, std::shared_ptr<WatcherState> state) {}
+  virtual void cleanupAfterError() {}
 
   static std::shared_ptr<Backend> getShared(std::string backend);
   void releaseShared();
@@ -29,8 +30,9 @@ public:
 
   std::mutex mMutex;
   std::thread mThread;
-private:
+protected:
   std::unordered_set<WatcherRef> mSubscriptions;
+private:
   std::unordered_set<WatcherRef> mInvalidSubscriptions;
   std::atomic<size_t> mSharedReservations {0};
   std::mutex mStartupMutex;

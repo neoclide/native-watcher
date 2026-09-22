@@ -56,7 +56,7 @@ private:
   Signal mEndedSignal;
 
   bool watchDir(WatcherRef watcher, std::string path, std::shared_ptr<DirTree> tree);
-  bool addCreatedTree(WatcherRef watcher, const std::string &path, std::shared_ptr<DirTree> tree);
+  bool addCreatedTree(WatcherRef watcher, const std::string &path, std::shared_ptr<DirTree> tree, bool reportEvents = true);
   void handleEvents();
   void closeDescriptors();
   void handleOverflow(std::unordered_set<WatcherRef> &watchers);

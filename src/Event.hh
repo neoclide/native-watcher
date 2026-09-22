@@ -46,6 +46,7 @@ public:
       // Assume update event when rapidly removed and created
       // https://github.com/parcel-bundler/watcher/issues/72
       event->isDeleted = false;
+      event->renameId.reset();
     } else {
       event->isCreated = true;
     }
@@ -94,6 +95,7 @@ public:
     std::lock_guard<std::mutex> l(mMutex);
     Event *event = internalUpdate(path);
     event->isDeleted = true;
+    event->renameId.reset();
   }
 
   size_t size() {

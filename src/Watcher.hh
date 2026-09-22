@@ -20,7 +20,7 @@ using WatcherRef = std::shared_ptr<Watcher>;
 
 struct Callback {
   uint64_t id;
-  Napi::ThreadSafeFunction tsfn;
+  napi_threadsafe_function tsfn;
   Napi::FunctionReference ref;
   napi_env env;
   std::thread::id threadId;
@@ -38,6 +38,7 @@ struct Watcher : public std::enable_shared_from_this<Watcher> {
   std::unordered_set<Glob> mIgnoreGlobs;
   EventList mEvents;
   std::shared_ptr<WatcherState> state;
+  std::atomic<bool> mNeedsResubscribe {false};
 
   Watcher(std::string dir, std::unordered_set<std::string> ignorePaths, std::unordered_set<Glob> ignoreGlobs);
   ~Watcher();

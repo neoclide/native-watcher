@@ -134,8 +134,17 @@ public:
   void run() {
     try {
       poll();
+      mStartSignal.notify();
     } catch (WatcherError &err) {
-      mBackend->handleWatcherError(err);
+      mStartError = err.what();
+      mStartSignal.notify();
+    }
+  }
+
+  void waitForStart() {
+    mStartSignal.wait();
+    if (!mStartError.empty()) {
+      throw WatcherError(mStartError, mWatcher);
     }
   }
 
@@ -229,6 +238,7 @@ public:
           mWatcher->mEvents.remove(mWatcher->mDir);
           mTree->remove(mWatcher->mDir);
           mWatcher->notify();
+          invalidateCurrent();
           requestStop();
           return;
         }
@@ -431,12 +441,18 @@ public:
   }
 
 private:
+  void invalidateCurrent() {
+    std::lock_guard<std::mutex> lock(mBackend->mMutex);
+    mBackend->invalidate(mWatcher);
+  }
+
   void failOverflow() {
     mOverflowed = true;
     mWatcher->mEvents.error(
       "ReadDirectoryChangesW buffer overflow. The subscription can no "
       "longer guarantee complete filesystem events."
     );
+    invalidateCurrent();
     requestStop();
   }
 
@@ -457,12 +473,7 @@ private:
       CloseHandle(mDirectoryHandle);
       mDirectoryHandle = INVALID_HANDLE_VALUE;
     }
-    if (mOverflowed) {
-      std::unique_lock<std::mutex> lock(mBackend->mMutex);
-      mBackend->invalidate(mWatcher);
-      lock.unlock();
-      mWatcher->notify();
-    }
+    if (mOverflowed) mWatcher->notify();
     mStoppedSignal.notify();
   }
 
@@ -474,6 +485,8 @@ private:
   std::atomic<bool> mStopRequested {false};
   std::atomic<bool> mStopped {false};
   bool mOverflowed = false;
+  Signal mStartSignal;
+  std::string mStartError;
   Signal mStoppedSignal;
   std::optional<std::string> mPendingRenamePath;
   std::unordered_set<std::string> mRemovedPaths;
@@ -502,6 +515,12 @@ void WindowsBackend::subscribe(WatcherRef watcher) {
     watcher->state = nullptr;
     throw std::runtime_error("Unable to queue APC");
   }
+  try {
+    sub->waitForStart();
+  } catch (...) {
+    watcher->state = nullptr;
+    throw;
+  }
 }
 
 // Start cancellation while Backend::unwatch still retains the watcher state.
@@ -513,12 +532,13 @@ void WindowsBackend::unsubscribe(WatcherRef watcher) {
 }
 
 // Wait outside the Backend lock so the completion callback can report errors.
-void WindowsBackend::finishUnsubscribe(WatcherRef watcher) {
-  auto sub = std::static_pointer_cast<Subscription>(watcher->state);
+void WindowsBackend::finishUnsubscribe(WatcherRef watcher, std::shared_ptr<WatcherState> state) {
+  auto sub = std::static_pointer_cast<Subscription>(state);
   if (sub != nullptr) {
     sub->waitForStop();
   }
-  watcher->state = nullptr;
+  std::lock_guard<std::mutex> lock(mMutex);
+  if (watcher->state == state) watcher->state = nullptr;
 }
 
 bool WindowsBackend::isBackendThread() const {

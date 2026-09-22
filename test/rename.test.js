@@ -5,12 +5,47 @@ const fs = require('node:fs/promises');
 const os = require('node:os');
 const path = require('node:path');
 const test = require('node:test');
+const {execFile: execFileCallback} = require('node:child_process');
+const {promisify} = require('node:util');
 const watcher = require('..');
+
+const execFileAsync = promisify(execFileCallback);
 
 const exactRenamePlatform =
   process.platform === 'darwin' ||
   process.platform === 'linux' ||
   process.platform === 'win32';
+
+test(
+  'clears rename identity when a deleted target path is recreated in one batch',
+  {skip: process.platform === 'win32'},
+  async () => {
+    const tempDirectory = await fs.mkdtemp(
+      path.join(await fs.realpath(os.tmpdir()), 'native-watcher-event-list-'),
+    );
+    try {
+      const addonInclude = require('node-addon-api').include.replace(/^"|"$/g, '');
+      const nodeInclude = path.resolve(process.execPath, '..', '..', 'include', 'node');
+      const source = path.join(__dirname, 'fixtures', 'event-list-rebuild.cc');
+      const binary = path.join(tempDirectory, 'event-list-rebuild');
+      await execFileAsync('c++', [
+        '-std=c++17',
+        '-ffunction-sections',
+        '-fdata-sections',
+        process.platform === 'darwin' ? '-Wl,-dead_strip' : '-Wl,--gc-sections',
+        `-I${addonInclude}`,
+        `-I${nodeInclude}`,
+        `-I${path.join(__dirname, '..', 'src')}`,
+        source,
+        '-o',
+        binary,
+      ]);
+      await execFileAsync(binary);
+    } finally {
+      await fs.rm(tempDirectory, {recursive: true, force: true});
+    }
+  },
+);
 
 function waitForEvents(queue, predicate = () => true, timeout = 5000) {
   if (queue.error) return Promise.reject(queue.error);

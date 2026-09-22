@@ -72,7 +72,7 @@ void Watcher::cleanupEnvironment(napi_env env) {
       std::unique_lock<std::mutex> lock(watcher->mMutex);
       for (auto it = watcher->mCallbacks.begin(); it != watcher->mCallbacks.end();) {
         if (it->env == env) {
-          it->tsfn.Abort();
+          napi_release_threadsafe_function(it->tsfn, napi_tsfn_abort);
           it->ref.Unref();
           it = watcher->mCallbacks.erase(it);
           removedCallback = true;
@@ -157,7 +157,14 @@ Value callbackEventsToJS(const Env &env, std::vector<Event> &events) {
   return scope.Escape(arr);
 }
 
-void callJSFunction(Napi::Env env, Function jsCallback, CallbackData *data) {
+void callJSFunction(napi_env rawEnv, napi_value rawCallback, void *, void *rawData) {
+  auto *data = static_cast<CallbackData *>(rawData);
+  if (rawEnv == nullptr) {
+    delete data;
+    return;
+  }
+  Napi::Env env(rawEnv);
+  Function jsCallback(env, rawCallback);
   HandleScope scope(env);
   auto err = data->error.size() > 0 ? Error::New(env, data->error).Value() : env.Null();
   auto events = callbackEventsToJS(env, data->events);
@@ -188,7 +195,7 @@ void Watcher::notifyError(std::exception &err) {
 
     it->closing = true;
     CallbackData *data = new CallbackData(err.what(), watcher, it->id);
-    napi_status status = it->tsfn.BlockingCall(data, callJSFunction);
+    napi_status status = napi_call_threadsafe_function(it->tsfn, data, napi_tsfn_blocking);
     if (status != napi_ok) {
       delete data;
     }
@@ -210,7 +217,7 @@ void Watcher::triggerCallbacks() {
       }
 
       auto data = new CallbackData(batch.error, batch.events);
-      napi_status status = it->tsfn.BlockingCall(data, callJSFunction);
+      napi_status status = napi_call_threadsafe_function(it->tsfn, data, napi_tsfn_blocking);
       if (status != napi_ok) {
         delete data;
         if (status == napi_closing) {
@@ -230,13 +237,15 @@ bool Watcher::watch(Function callback) {
     return false;
   }
 
-  auto tsfn = ThreadSafeFunction::New(
-    callback.Env(),
-    callback,
-    "Watcher callback",
-    0, // Unlimited queue
-    1 // Initial thread count
+  napi_threadsafe_function tsfn;
+  napi_status status = napi_create_threadsafe_function(
+    callback.Env(), callback, nullptr,
+    String::New(callback.Env(), "Watcher callback"),
+    0, 1, nullptr, nullptr, nullptr, callJSFunction, &tsfn
   );
+  if (status != napi_ok) {
+    throw Error::New(callback.Env(), "Unable to create watcher callback");
+  }
 
   mCallbacks.push_back(Callback {
     mNextCallbackId++,
@@ -257,7 +266,7 @@ void Watcher::finishErrorCallback(uint64_t callbackId) {
     std::unique_lock<std::mutex> lock(mMutex);
     for (auto it = mCallbacks.begin(); it != mCallbacks.end(); it++) {
       if (it->id == callbackId) {
-        it->tsfn.Release();
+        napi_release_threadsafe_function(it->tsfn, napi_tsfn_release);
         it->ref.Unref();
         mCallbacks.erase(it);
         break;
@@ -326,7 +335,7 @@ bool Watcher::unwatch(Function callback) {
     std::unique_lock<std::mutex> lk(mMutex);
     auto it = findCallback(callback);
     if (it != mCallbacks.end()) {
-      it->tsfn.Release();
+      napi_release_threadsafe_function(it->tsfn, napi_tsfn_release);
       it->ref.Unref();
       mCallbacks.erase(it);
       removed = true;
@@ -363,7 +372,7 @@ void Watcher::destroy() {
 // Private because it doesn't lock.
 void Watcher::clearCallbacks() {
   for (auto it = mCallbacks.begin(); it != mCallbacks.end(); it++) {
-    it->tsfn.Release();
+    napi_release_threadsafe_function(it->tsfn, napi_tsfn_release);
     it->ref.Unref();
   }
 
@@ -389,6 +398,12 @@ bool Watcher::isIgnored(std::string path) {
   for (auto it = mIgnoreGlobs.begin(); it != mIgnoreGlobs.end(); it++) {
     if (it->isIgnored(relativePath)) {
       return true;
+    }
+    for (size_t end = relativePath.find(DIR_SEP); end != std::string::npos;
+         end = relativePath.find(DIR_SEP, end + 1)) {
+      if (it->isIgnored(relativePath.substr(0, end))) {
+        return true;
+      }
     }
   }
 
