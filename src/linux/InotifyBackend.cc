@@ -339,7 +339,17 @@ bool InotifyBackend::handleSubscription(struct inotify_event *event, std::shared
     std::string oldPath;
     if (isMoveWithinRoot) {
       oldPath = pending->second.path;
-      watcher->mEvents.rename(oldPath, path, "inotify:" + std::to_string(event->cookie));
+      bool targetExisted = sub->tree->find(path) != nullptr;
+      if (targetExisted) {
+        watcher->mEvents.remove(oldPath);
+        watcher->mEvents.create(path);
+      } else {
+        watcher->mEvents.rename(
+          oldPath,
+          path,
+          "inotify:" + std::to_string(event->cookie)
+        );
+      }
       pendingMoves.erase(pending);
     } else {
       watcher->mEvents.create(path);

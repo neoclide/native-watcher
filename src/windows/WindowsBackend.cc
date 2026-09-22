@@ -304,11 +304,18 @@ public:
         WIN32_FILE_ATTRIBUTE_DATA data;
         if (GetFileAttributesExW(utf8ToUtf16(path).data(), GetFileExInfoStandard, &data)) {
           if (mPendingRenamePath.has_value()) {
-            mWatcher->mEvents.rename(
-              *mPendingRenamePath,
-              path,
-              "windows:" + std::to_string(++mRenameSequence)
-            );
+            bool targetExisted = mTree->find(path) != nullptr;
+            if (targetExisted) {
+              mWatcher->mEvents.remove(*mPendingRenamePath);
+              mWatcher->mEvents.create(path);
+              mTree->remove(path);
+            } else {
+              mWatcher->mEvents.rename(
+                *mPendingRenamePath,
+                path,
+                "windows:" + std::to_string(++mRenameSequence)
+              );
+            }
             mPendingRenamePath.reset();
             mTree->add(path, CONVERT_TIME(data.ftLastWriteTime), data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY);
           } else {

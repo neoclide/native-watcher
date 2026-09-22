@@ -332,6 +332,36 @@ test(
 );
 
 test(
+  'does not correlate a rename that replaces an existing target',
+  {skip: !['linux', 'win32'].includes(process.platform)},
+  async (t) => {
+    const tempDirectory = await fs.realpath(os.tmpdir());
+    const directory = await fs.mkdtemp(path.join(tempDirectory, 'native-watcher-'));
+    const source = path.join(directory, 'source.txt');
+    const target = path.join(directory, 'target.txt');
+    await fs.writeFile(source, 'source');
+    await fs.writeFile(target, 'target');
+
+    const pending = [];
+    const subscription = await watcher.subscribe(directory, (error, events) => {
+      dispatchEvents(pending, error, events);
+    });
+    t.after(async () => {
+      await subscription.unsubscribe();
+      await fs.rm(directory, {recursive: true, force: true});
+    });
+
+    const eventsPromise = waitForEvents(pending, (events) =>
+      containsEvent(events, 'delete', source) &&
+      events.some((event) => event.path === target),
+    );
+    await fs.rename(source, target);
+    const events = await eventsPromise;
+    assert.ok(events.every((event) => event.renameId === undefined));
+  },
+);
+
+test(
   'does not assign a rename id when only one side is watched',
   {skip: !exactRenamePlatform},
   async (t) => {
