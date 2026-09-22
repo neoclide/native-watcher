@@ -10,7 +10,7 @@ The package supports Linux, macOS, and Windows. It exposes one API: `subscribe`.
 
 ## Install and build
 
-Node.js 18 or newer and a C++17 toolchain are required. Installing from a source
+Node.js 24 or newer and a C++17 toolchain are required. Installing from a source
 checkout builds the addon with `node-gyp`:
 
 ```sh
@@ -176,7 +176,10 @@ await watcher.subscribe(root, callback, {
 - A glob is matched against the path relative to the watched directory. Dotfiles
   are included in glob matching.
 - A `RegExp` matches anywhere in the relative path. Flags are rejected; use the
-  pattern itself to express the match.
+  pattern itself to express the match. Its source must use syntax supported by
+  C++ `std::regex` in ECMAScript mode; JavaScript-only constructs such as
+  lookbehind are not supported. An unsupported pattern rejects the
+  `subscribe()` promise.
 - A move across an ignore boundary is a one-sided create or delete and has no
   `renameId`.
 
