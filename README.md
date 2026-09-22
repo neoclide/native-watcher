@@ -88,7 +88,8 @@ await subscription.unsubscribe();
 Starts a recursive subscription and resolves to a `Subscription` object.
 
 - `directory` is the directory to watch. Relative paths are resolved against
-  `process.cwd()`.
+  `process.cwd()`. On macOS, a symlink used as the subscription root is resolved
+  to its real path before ignore rules and events are processed.
 - `callback(error, events)` receives an error or a batch of events.
 - `options.ignore` is an optional array of paths, glob strings, and regular
   expressions.

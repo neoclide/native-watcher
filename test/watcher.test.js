@@ -442,6 +442,46 @@ test(
   },
 );
 
+test(
+  'applies ignore globs when the macOS root is a symlink',
+  {skip: process.platform !== 'darwin'},
+  async () => {
+    const tempRoot = await fs.realpath(os.tmpdir());
+    const parent = await fs.mkdtemp(
+      path.join(tempRoot, 'native-watcher-root-alias-'),
+    );
+    const realDirectory = path.join(parent, 'real');
+    const aliasDirectory = path.join(parent, 'alias');
+    await fs.mkdir(realDirectory);
+    await fs.symlink(realDirectory, aliasDirectory, 'dir');
+
+    const collector = new EventCollector();
+    const subscription = await watcher.subscribe(
+      aliasDirectory,
+      collector.callback,
+      {ignore: ['**/*.log', path.join(aliasDirectory, 'ignored.txt')]},
+    );
+    try {
+      const ignoredGlob = path.join(realDirectory, 'ignored.log');
+      const ignoredPath = path.join(realDirectory, 'ignored.txt');
+      const visible = path.join(realDirectory, 'visible.txt');
+      const mark = collector.mark();
+      const observed = collector.waitFor('create', visible, mark);
+      await fs.writeFile(ignoredGlob, 'ignored');
+      await fs.writeFile(ignoredPath, 'ignored');
+      await fs.writeFile(visible, 'visible');
+      await observed;
+      await settle();
+      const events = collector.events.slice(mark);
+      assertNoPath(events, ignoredGlob);
+      assertNoPath(events, ignoredPath);
+    } finally {
+      await subscription.unsubscribe();
+      await fs.rm(parent, {recursive: true, force: true});
+    }
+  },
+);
+
 test('keeps different ignore options separate for the same directory', async (t) => {
   let firstExisting;
   let secondExisting;

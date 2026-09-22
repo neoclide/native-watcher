@@ -1,10 +1,11 @@
 'use strict';
 
+const fs = require('node:fs/promises');
 const path = require('path');
 const isGlob = require('is-glob');
 const picomatch = require('picomatch');
 
-function normalizeOptions(directory, options = {}) {
+function normalizeOptions(directory, options = {}, inputDirectory = directory) {
   const {ignore, ...nativeOptions} = options;
 
   if (!Array.isArray(ignore)) return nativeOptions;
@@ -24,7 +25,18 @@ function normalizeOptions(directory, options = {}) {
       });
       (nativeOptions.ignoreGlobs ??= []).push(regex.source);
     } else {
-      (nativeOptions.ignorePaths ??= []).push(path.resolve(directory, value));
+      const absolutePath = path.resolve(inputDirectory, value);
+      const relativePath = path.relative(inputDirectory, absolutePath);
+      const isInsideRoot = relativePath === '' || (
+        relativePath !== '..' &&
+        !relativePath.startsWith(`..${path.sep}`) &&
+        !path.isAbsolute(relativePath)
+      );
+      (nativeOptions.ignorePaths ??= []).push(
+        isInsideRoot
+          ? path.resolve(directory, relativePath)
+          : absolutePath,
+      );
     }
   }
 
@@ -34,8 +46,15 @@ function normalizeOptions(directory, options = {}) {
 exports.createWrapper = (binding) => ({
   async subscribe(directory, callback, options) {
     const absoluteDirectory = path.resolve(directory);
-    const nativeOptions = normalizeOptions(absoluteDirectory, options);
-    await binding.subscribe(absoluteDirectory, callback, nativeOptions);
+    const watchedDirectory = process.platform === 'darwin'
+      ? await fs.realpath(absoluteDirectory)
+      : absoluteDirectory;
+    const nativeOptions = normalizeOptions(
+      watchedDirectory,
+      options,
+      absoluteDirectory,
+    );
+    await binding.subscribe(watchedDirectory, callback, nativeOptions);
 
     let active = true;
     return {
@@ -43,7 +62,7 @@ exports.createWrapper = (binding) => ({
         if (!active) return;
         active = false;
         await binding.unsubscribe(
-          absoluteDirectory,
+          watchedDirectory,
           callback,
           nativeOptions,
         );
