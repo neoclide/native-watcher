@@ -3,6 +3,12 @@
 #include <unistd.h>
 #include <fcntl.h>
 #include <sys/stat.h>
+
+#ifdef __THROW
+#undef __THROW
+#endif
+#define __THROW
+#include <fts.h>
 #include "InotifyBackend.hh"
 
 #define INOTIFY_MASK \
@@ -93,6 +99,44 @@ bool InotifyBackend::watchDir(WatcherRef watcher, std::string path, std::shared_
   sub->watcher = watcher;
   mSubscriptions.emplace(wd, sub);
 
+  return true;
+}
+
+bool InotifyBackend::addCreatedTree(
+  WatcherRef watcher,
+  const std::string &path,
+  std::shared_ptr<DirTree> tree
+) {
+  char *paths[2] {const_cast<char *>(path.c_str()), nullptr};
+  FTS *fts = fts_open(paths, FTS_NOCHDIR | FTS_PHYSICAL, nullptr);
+  if (fts == nullptr) return false;
+
+  bool isRoot = true;
+  FTSENT *node;
+  while ((node = fts_read(fts)) != nullptr) {
+    if (node->fts_info == FTS_DP) continue;
+    if (node->fts_errno != 0) {
+      fts_close(fts);
+      return false;
+    }
+
+    std::string candidate(node->fts_path);
+    if (!isRoot && watcher->isIgnored(candidate)) {
+      if (node->fts_info == FTS_D) fts_set(fts, node, FTS_SKIP);
+      continue;
+    }
+
+    bool isDirectory = node->fts_info == FTS_D;
+    tree->add(candidate, CONVERT_TIME(node->fts_statp->st_mtim), isDirectory);
+    if (!isRoot) watcher->mEvents.create(candidate);
+    if (isDirectory && !isRoot && !watchDir(watcher, candidate, tree)) {
+      fts_close(fts);
+      return false;
+    }
+    isRoot = false;
+  }
+
+  fts_close(fts);
   return true;
 }
 
@@ -195,7 +239,8 @@ bool InotifyBackend::handleSubscription(struct inotify_event *event, std::shared
       pending = pendingMoves.find({watcher.get(), event->cookie});
     }
 
-    if (pending != pendingMoves.end()) {
+    bool isMoveWithinRoot = pending != pendingMoves.end();
+    if (isMoveWithinRoot) {
       watcher->mEvents.rename(pending->second.path, path, "inotify:" + std::to_string(event->cookie));
       pendingMoves.erase(pending);
     } else {
@@ -212,6 +257,9 @@ bool InotifyBackend::handleSubscription(struct inotify_event *event, std::shared
 
     if (entry->isDir) {
       bool success = watchDir(watcher, path, sub->tree);
+      if (success && !isMoveWithinRoot) {
+        success = addCreatedTree(watcher, path, sub->tree);
+      }
       if (!success) {
         sub->tree->remove(path);
         return false;

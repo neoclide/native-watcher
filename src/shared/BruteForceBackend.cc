@@ -4,10 +4,11 @@
 #include "./BruteForceBackend.hh"
 
 std::shared_ptr<DirTree> BruteForceBackend::getTree(WatcherRef watcher, bool shouldRead) {
-  auto tree = DirTree::getCached(watcher->mDir);
+  // Tree contents depend on the watcher's ignore rules, so subscriptions for
+  // the same root must not share a cache keyed only by the root path.
+  auto tree = std::make_shared<DirTree>(watcher->mDir);
 
-  // If the tree is not complete, read it if needed.
-  if (!tree->isComplete && shouldRead) {
+  if (shouldRead) {
     readTree(watcher, tree);
     tree->isComplete = true;
   }

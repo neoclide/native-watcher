@@ -49,6 +49,50 @@ using RenameCandidates = std::unordered_map<
   FileIdentityHash
 >;
 
+void addCreatedPath(
+  WatcherRef watcher,
+  State *state,
+  EventList &events,
+  const std::string &path,
+  bool isDirectoryHint
+) {
+  auto entry = readIndexedPath(path);
+  if (!entry.has_value()) {
+    state->tree->add(path, 0, isDirectoryHint);
+    events.create(path);
+    return;
+  }
+
+  if (!entry->isDirectory) {
+    state->identities.add(path, *entry);
+    state->tree->add(path, entry->mtime, false);
+    events.create(path);
+    return;
+  }
+
+  // FSEvents may report only the top-level directory when a populated tree is
+  // moved into the watched root. Index and report the full subtree now so a
+  // later rename of an existing child can still be correlated by identity.
+  scanIdentityIndex(
+    path,
+    [watcher](const std::string &candidate) {
+      return watcher->isIgnored(candidate);
+    },
+    [state, &events](
+      const std::string &candidate,
+      const IndexedPath &candidateEntry
+    ) {
+      state->identities.add(candidate, candidateEntry);
+      state->tree->add(
+        candidate,
+        candidateEntry.mtime,
+        candidateEntry.isDirectory
+      );
+      events.create(candidate);
+    }
+  );
+}
+
 std::unordered_set<std::string> correlateRenames(
   WatcherRef watcher,
   State *state,
@@ -347,14 +391,11 @@ void processEvents(
     }
 
     if (isCreated && !(isRemoved || isModified || isRenamed)) {
-      auto entry = readIndexedPath(event.path);
-      if (entry.has_value()) {
-        state->identities.add(event.path, *entry);
-        state->tree->add(event.path, entry->mtime, entry->isDirectory);
-      } else {
-        state->tree->add(event.path, 0, isDir);
+      try {
+        addCreatedPath(watcher, state, list, event.path, isDir);
+      } catch (const std::exception &error) {
+        list.error(error.what());
       }
-      list.create(event.path);
     } else if (isRemoved && !(isCreated || isModified || isRenamed)) {
       state->identities.remove(event.path);
       state->tree->remove(event.path);
@@ -409,6 +450,12 @@ void processEvents(
       if (isModified && entry) {
         state->tree->update(event.path, indexed->mtime);
         list.update(event.path);
+      } else if (!sameIdentity && indexed->isDirectory) {
+        try {
+          addCreatedPath(watcher, state, list, event.path, true);
+        } catch (const std::exception &error) {
+          list.error(error.what());
+        }
       } else {
         state->tree->add(
           event.path,

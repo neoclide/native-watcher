@@ -1,5 +1,6 @@
 #include <string>
 #include <stack>
+#include <cwchar>
 #include "../DirTree.hh"
 #include "../shared/BruteForceBackend.hh"
 #include "./WindowsBackend.hh"
@@ -239,10 +240,10 @@ public:
               "windows:" + std::to_string(++mRenameSequence)
             );
             mPendingRenamePath.reset();
+            mTree->add(path, CONVERT_TIME(data.ftLastWriteTime), data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY);
           } else {
-            mWatcher->mEvents.create(path);
+            addPath(path);
           }
-          mTree->add(path, CONVERT_TIME(data.ftLastWriteTime), data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY);
         }
         break;
       }
@@ -271,10 +272,46 @@ public:
   }
 
   void addPath(const std::string &path) {
-    WIN32_FILE_ATTRIBUTE_DATA data;
-    if (GetFileAttributesExW(utf8ToUtf16(path).data(), GetFileExInfoStandard, &data)) {
-      mWatcher->mEvents.create(path);
-      mTree->add(path, CONVERT_TIME(data.ftLastWriteTime), data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY);
+    std::stack<std::string> pending;
+    pending.push(path);
+
+    while (!pending.empty()) {
+      std::string candidate = pending.top();
+      pending.pop();
+      if (mWatcher->isIgnored(candidate)) continue;
+
+      WIN32_FILE_ATTRIBUTE_DATA data;
+      if (!GetFileAttributesExW(
+        utf8ToUtf16(candidate).data(),
+        GetFileExInfoStandard,
+        &data
+      )) {
+        continue;
+      }
+
+      bool isDirectory = data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY;
+      mWatcher->mEvents.create(candidate);
+      mTree->add(candidate, CONVERT_TIME(data.ftLastWriteTime), isDirectory);
+      if (!isDirectory || (data.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT)) {
+        continue;
+      }
+
+      WIN32_FIND_DATAW entry;
+      HANDLE search = FindFirstFileW(
+        utf8ToUtf16(candidate + "\\*").data(),
+        &entry
+      );
+      if (search == INVALID_HANDLE_VALUE) continue;
+      do {
+        std::string name = utf16ToUtf8(
+          entry.cFileName,
+          static_cast<DWORD>(wcslen(entry.cFileName))
+        );
+        if (name != "." && name != "..") {
+          pending.push(candidate + "\\" + name);
+        }
+      } while (FindNextFileW(search, &entry));
+      FindClose(search);
     }
   }
 
@@ -301,7 +338,7 @@ private:
 // This function is called by Backend::watch which takes a lock on mMutex
 void WindowsBackend::subscribe(WatcherRef watcher) {
   // Create a subscription for this watcher
-  auto sub = std::make_shared<Subscription>(this, watcher, getTree(watcher, false));
+  auto sub = std::make_shared<Subscription>(this, watcher, getTree(watcher));
   watcher->state = sub;
 
   // Queue polling for this subscription in the correct thread.

@@ -51,6 +51,7 @@ private:
   Signal mEndedSignal;
 
   bool watchDir(WatcherRef watcher, std::string path, std::shared_ptr<DirTree> tree);
+  bool addCreatedTree(WatcherRef watcher, const std::string &path, std::shared_ptr<DirTree> tree);
   void handleEvents();
   void flushExpiredMoves();
   void handleEvent(struct inotify_event *event, std::unordered_set<WatcherRef> &watchers, PendingInotifyMoves &pendingMoves);

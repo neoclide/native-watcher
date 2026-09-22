@@ -1,13 +1,18 @@
 export type EventType = 'create' | 'update' | 'delete';
 
 export interface WatchEvent {
+  /** Absolute path of the changed entry. */
   path: string;
   type: EventType;
-  /** Present on both sides when the native backend reliably correlates a rename. */
+  /**
+   * Opaque id present on both the delete and create sides when the backend can
+   * correlate an unambiguous rename. Do not parse or persist this value.
+   */
   renameId?: string;
 }
 
 export interface WatchOptions {
+  /** Paths, glob patterns, or flag-free regular expressions to exclude. */
   ignore?: Array<string | RegExp>;
 }
 
@@ -16,6 +21,7 @@ export interface Subscription {
 }
 
 export function subscribe(
+  /** Directory to watch recursively. Relative paths use process.cwd(). */
   directory: string,
   callback: (error: Error | null, events: WatchEvent[]) => void,
   options?: WatchOptions,
