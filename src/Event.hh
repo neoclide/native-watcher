@@ -8,6 +8,7 @@
 #include <map>
 #include <optional>
 #include <unordered_map>
+#include <vector>
 
 using namespace Napi;
 
@@ -29,6 +30,11 @@ struct Event {
     }
     return scope.Escape(res);
   }
+};
+
+struct EventBatch {
+  std::string error;
+  std::vector<Event> events;
 };
 
 class EventList {
@@ -95,9 +101,9 @@ public:
     return mEvents.size();
   }
 
-  std::vector<Event> getEvents() {
+  EventBatch drain() {
     std::lock_guard<std::mutex> l(mMutex);
-    std::vector<Event> eventsCloneVector;
+    EventBatch batch {mError.value_or(""), {}};
     struct RenameParts {
       size_t created = 0;
       size_t deleted = 0;
@@ -106,7 +112,7 @@ public:
     std::unordered_map<std::string, RenameParts> renameParts;
     for(auto it = mEvents.begin(); it != mEvents.end(); ++it) {
       if (!(it->second.isCreated && it->second.isDeleted)) {
-        eventsCloneVector.push_back(it->second);
+        batch.events.push_back(it->second);
         if (it->second.renameId.has_value()) {
           auto &parts = renameParts[*it->second.renameId];
           if (it->second.isCreated) {
@@ -122,7 +128,7 @@ public:
 
     // Coalescing may remove or change one side of a rename. Never expose an id
     // unless the final batch still contains exactly one delete and one create.
-    for (auto &event : eventsCloneVector) {
+    for (auto &event : batch.events) {
       if (event.renameId.has_value()) {
         auto parts = renameParts[*event.renameId];
         if (parts.created != 1 || parts.deleted != 1 || parts.other != 0) {
@@ -130,13 +136,9 @@ public:
         }
       }
     }
-    return eventsCloneVector;
-  }
-
-  void clear() {
-    std::lock_guard<std::mutex> l(mMutex);
     mEvents.clear();
     mError.reset();
+    return batch;
   }
 
   void error(std::string err) {
@@ -149,11 +151,6 @@ public:
   bool hasError() {
     std::lock_guard<std::mutex> l(mMutex);
     return mError.has_value();
-  }
-
-  std::string getError() {
-    std::lock_guard<std::mutex> l(mMutex);
-    return mError.value_or("");
   }
 
 private:

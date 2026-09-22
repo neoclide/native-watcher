@@ -174,17 +174,18 @@ void Watcher::notifyError(std::exception &err) {
 // This function is called from the debounce thread.
 void Watcher::triggerCallbacks() {
   std::unique_lock<std::mutex> lk(mMutex);
-  if (mCallbacks.size() > 0 && (mEvents.size() > 0 || mEvents.hasError())) {
-    auto error = mEvents.getError();
-    auto events = mEvents.getEvents();
-    mEvents.clear();
+  if (mCallbacks.size() > 0) {
+    auto batch = mEvents.drain();
+    if (batch.events.empty() && batch.error.empty()) {
+      return;
+    }
 
     for (auto it = mCallbacks.begin(); it != mCallbacks.end(); it++) {
       if (it->closing) {
         continue;
       }
 
-      auto data = new CallbackData(error, events);
+      auto data = new CallbackData(batch.error, batch.events);
       napi_status status = it->tsfn.BlockingCall(data, callJSFunction);
       if (status != napi_ok) {
         delete data;
