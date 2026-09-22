@@ -6,12 +6,31 @@ on:
   workflow_dispatch:
 
 jobs:
-  test:
+  native:
+    name: ${{ matrix.name }}
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
-    runs-on: ${{ matrix.os }}
+        include:
+          - name: Linux x64 (glibc)
+            runner: ubuntu-24.04
+            artifact: linux-x64-glibc
+          - name: Linux arm64 (glibc)
+            runner: ubuntu-24.04-arm
+            artifact: linux-arm64-glibc
+          - name: macOS x64
+            runner: macos-15-intel
+            artifact: darwin-x64
+          - name: macOS arm64
+            runner: macos-15
+            artifact: darwin-arm64
+          - name: Windows x64
+            runner: windows-2025
+            artifact: win32-x64
+          - name: Windows arm64
+            runner: windows-11-vs2026-arm
+            artifact: win32-arm64
+    runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-node@v6
@@ -20,3 +39,26 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm test
+      - name: Upload native addon
+        uses: actions/upload-artifact@v4
+        with:
+          name: native-watcher-${{ matrix.artifact }}
+          path: build/Release/native_watcher.node
+          if-no-files-found: error
+
+  linux-musl:
+    name: Linux x64 (musl)
+    runs-on: ubuntu-24.04
+    container: node:24-alpine
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install native build tools
+        run: apk add --no-cache python3 make g++
+      - run: npm ci
+      - run: npm test
+      - name: Upload native addon
+        uses: actions/upload-artifact@v4
+        with:
+          name: native-watcher-linux-x64-musl
+          path: build/Release/native_watcher.node
+          if-no-files-found: error

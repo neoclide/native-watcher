@@ -2,7 +2,7 @@
   "targets": [
     {
       "target_name": "native_watcher",
-      "defines": ["NAPI_DISABLE_CPP_EXCEPTIONS"],
+      "defines": ["NAPI_DISABLE_CPP_EXCEPTIONS", "NAPI_VERSION=8"],
       "sources": [
         "src/binding.cc",
         "src/Watcher.cc",
@@ -12,7 +12,9 @@
         "src/Debounce.cc"
       ],
       "include_dirs": ["<!(node -p \"require('node-addon-api').include_dir\")"],
-      "cflags_cc": ["-std=c++17"],
+      "cflags!": ["-fno-exceptions"],
+      "cflags_cc!": ["-fno-exceptions"],
+      "cflags_cc": ["-std=c++17", "-fexceptions"],
       "conditions": [
         ["OS=='mac'", {
           "sources": ["src/macos/FSEventsBackend.cc"],
