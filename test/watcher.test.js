@@ -739,6 +739,14 @@ test('rejects a missing path and a file path', async (t) => {
   await assert.rejects(watcher.subscribe(file, () => {}));
 });
 
+test('rejects a non-function callback', async (t) => {
+  const {directory} = await createFixture(t);
+  await assert.rejects(
+    watcher.subscribe(directory, null),
+    {name: 'TypeError', message: 'Expected a function'},
+  );
+});
+
 async function assertIgnored(t, options, ignoredRelativePath, mutateIgnored) {
   const {directory, collector} = await createFixture(t, options);
   const ignoredPath = path.join(directory, ignoredRelativePath);

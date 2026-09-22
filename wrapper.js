@@ -45,6 +45,9 @@ function normalizeOptions(directory, options = {}, inputDirectory = directory) {
 
 exports.createWrapper = (binding) => ({
   async subscribe(directory, callback, options) {
+    if (typeof callback !== 'function') {
+      throw new TypeError('Expected a function');
+    }
     const absoluteDirectory = path.resolve(directory);
     const watchedDirectory = process.platform === 'darwin'
       ? await fs.realpath(absoluteDirectory)
