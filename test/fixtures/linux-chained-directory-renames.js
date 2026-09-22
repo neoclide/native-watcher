@@ -65,6 +65,7 @@ async function runParent(mode) {
       'subscriber to stop',
     );
 
+    const operationMark = messages.length;
     if (mode === 'reuse') {
       await fs.rename(oldRoot, path.join(parent, 'outside'));
       await fs.mkdir(path.dirname(oldChild), {recursive: true});
@@ -98,6 +99,23 @@ async function runParent(mode) {
       ),
       `missing update for ${expectedChild}: ${JSON.stringify(events)}`,
     );
+    if (mode === 'reuse') {
+      const operationEvents = messages
+        .slice(operationMark)
+        .flatMap((message) => message.events ?? []);
+      assert.ok(
+        operationEvents.some(
+          (event) => event.type === 'create' && event.path === oldRoot,
+        ),
+        `missing create for reused path ${oldRoot}: ${JSON.stringify(operationEvents)}`,
+      );
+      assert.ok(
+        operationEvents.every(
+          (event) => event.type !== 'delete' || event.path !== oldRoot,
+        ),
+        `received stale delete for reused path ${oldRoot}: ${JSON.stringify(operationEvents)}`,
+      );
+    }
     if (mode !== 'reuse') {
       assert.ok(
         events.every((event) => event.path !== oldChild),

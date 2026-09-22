@@ -247,7 +247,12 @@ void InotifyBackend::flushExpiredMoves() {
     }
 
     auto &move = it->second;
-    move.watcher->mEvents.remove(move.path);
+    // A new entry may have reused this path while the old move was waiting
+    // for its pair. Do not report the old entry's removal as a deletion of
+    // the new one; its create event already describes the current path.
+    if (move.tree->find(move.path) == nullptr) {
+      move.watcher->mEvents.remove(move.path);
+    }
     if (move.isDirectory) {
       removeSubscriptions(move);
     }
