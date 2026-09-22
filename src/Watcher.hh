@@ -18,6 +18,7 @@ class Backend;
 using WatcherRef = std::shared_ptr<Watcher>;
 
 struct Callback {
+  uint64_t id;
   Napi::ThreadSafeFunction tsfn;
   Napi::FunctionReference ref;
   napi_env env;
@@ -30,7 +31,7 @@ public:
     virtual ~WatcherState() = default;
 };
 
-struct Watcher {
+struct Watcher : public std::enable_shared_from_this<Watcher> {
   std::string mDir;
   std::unordered_set<std::string> mIgnorePaths;
   std::unordered_set<Glob> mIgnoreGlobs;
@@ -55,6 +56,7 @@ struct Watcher {
   void unref();
   bool isIgnored(std::string path);
   void destroy();
+  void finishErrorCallback(uint64_t callbackId);
 
   static WatcherRef getShared(std::string dir, std::unordered_set<std::string> ignorePaths, std::unordered_set<Glob> ignoreGlobs);
   static void cleanupEnvironment(napi_env env);
@@ -63,6 +65,7 @@ private:
   std::mutex mMutex;
   std::condition_variable mCond;
   std::vector<Callback> mCallbacks;
+  uint64_t mNextCallbackId = 1;
   std::vector<std::weak_ptr<Backend>> mBackends;
   std::shared_ptr<Debounce> mDebounce;
 

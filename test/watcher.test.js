@@ -476,9 +476,13 @@ test('rejects a missing path and a file path', async (t) => {
   );
   t.after(() => fs.rm(directory, {recursive: true, force: true}));
 
-  await assert.rejects(
-    watcher.subscribe(path.join(directory, 'missing'), () => {}),
-  );
+  const missing = path.join(directory, 'missing');
+  const callback = () => {};
+  await assert.rejects(watcher.subscribe(missing, callback));
+
+  await fs.mkdir(missing);
+  const recovered = await watcher.subscribe(missing, callback);
+  await recovered.unsubscribe();
 
   const file = path.join(directory, 'file.txt');
   await fs.writeFile(file, 'content');

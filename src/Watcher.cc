@@ -133,7 +133,15 @@ void Watcher::notify() {
 struct CallbackData {
   std::string error;
   std::vector<Event> events;
-  CallbackData(std::string error, std::vector<Event> events) : error(error), events(events) {}
+  WatcherRef watcher;
+  uint64_t callbackId;
+  CallbackData(std::string error, std::vector<Event> events)
+    : error(error), events(events), callbackId(0) {}
+  CallbackData(
+    std::string error,
+    WatcherRef watcher,
+    uint64_t callbackId
+  ) : error(error), watcher(watcher), callbackId(callbackId) {}
 };
 
 Value callbackEventsToJS(const Env &env, std::vector<Event> &events) {
@@ -151,7 +159,13 @@ void callJSFunction(Napi::Env env, Function jsCallback, CallbackData *data) {
   auto err = data->error.size() > 0 ? Error::New(env, data->error).Value() : env.Null();
   auto events = callbackEventsToJS(env, data->events);
   jsCallback.Call({err, events});
+  auto watcher = data->watcher;
+  auto callbackId = data->callbackId;
   delete data;
+
+  if (watcher) {
+    watcher->finishErrorCallback(callbackId);
+  }
 
   // Throw errors from the callback as fatal exceptions
   // If we don't handle these node segfaults...
@@ -163,12 +177,19 @@ void callJSFunction(Napi::Env env, Function jsCallback, CallbackData *data) {
 
 void Watcher::notifyError(std::exception &err) {
   std::unique_lock<std::mutex> lk(mMutex);
+  auto watcher = shared_from_this();
   for (auto it = mCallbacks.begin(); it != mCallbacks.end(); it++) {
-    CallbackData *data = new CallbackData(err.what(), {});
-    it->tsfn.BlockingCall(data, callJSFunction);
-  }
+    if (it->closing) {
+      continue;
+    }
 
-  clearCallbacks();
+    it->closing = true;
+    CallbackData *data = new CallbackData(err.what(), watcher, it->id);
+    napi_status status = it->tsfn.BlockingCall(data, callJSFunction);
+    if (status != napi_ok) {
+      delete data;
+    }
+  }
 }
 
 // This function is called from the debounce thread.
@@ -215,6 +236,7 @@ bool Watcher::watch(Function callback) {
   );
 
   mCallbacks.push_back(Callback {
+    mNextCallbackId++,
     tsfn,
     Napi::Persistent(callback),
     callback.Env(),
@@ -223,6 +245,23 @@ bool Watcher::watch(Function callback) {
   });
 
   return true;
+}
+
+// This is called by a ThreadSafeFunction on the callback's JavaScript thread.
+void Watcher::finishErrorCallback(uint64_t callbackId) {
+  std::unique_lock<std::mutex> lock(mMutex);
+  for (auto it = mCallbacks.begin(); it != mCallbacks.end(); it++) {
+    if (it->id == callbackId) {
+      it->tsfn.Release();
+      it->ref.Unref();
+      mCallbacks.erase(it);
+      break;
+    }
+  }
+
+  if (mCallbacks.empty()) {
+    unref();
+  }
 }
 
 bool Watcher::hasCallbacksForEnvironment(napi_env env) {

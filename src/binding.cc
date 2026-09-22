@@ -83,6 +83,9 @@ public:
   }
 
   ~SubscribeRunner() override {
+    if (cleanupAfterFailure) {
+      watcher->destroy();
+    }
     releaseBackend();
   }
 
@@ -92,6 +95,7 @@ private:
   FunctionReference callback;
   napi_env callbackEnv;
   bool hasBackendReservation = true;
+  bool cleanupAfterFailure = false;
 
   void releaseBackend() {
     if (hasBackendReservation) {
@@ -109,7 +113,7 @@ private:
       }
       releaseBackend();
     } catch (std::exception&) {
-      watcher->destroy();
+      cleanupAfterFailure = true;
       releaseBackend();
       throw;
     }
