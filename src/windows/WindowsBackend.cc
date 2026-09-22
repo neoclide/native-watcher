@@ -21,15 +21,13 @@ void BruteForceBackend::readTree(WatcherRef watcher, std::shared_ptr<DirTree> tr
     HANDLE hFind = INVALID_HANDLE_VALUE;
 
     std::string path = directories.top();
-    std::string spec = path + "\\*";
     directories.pop();
 
-    WIN32_FIND_DATA ffd;
-    hFind = FindFirstFile(spec.c_str(), &ffd);
+    WIN32_FIND_DATAW ffd;
+    hFind = FindFirstFileW(utf8ToUtf16(path + "\\*").data(), &ffd);
 
     if (hFind == INVALID_HANDLE_VALUE)  {
       if (path == watcher->mDir) {
-        FindClose(hFind);
         throw WatcherError("Error opening directory", watcher);
       }
 
@@ -38,8 +36,12 @@ void BruteForceBackend::readTree(WatcherRef watcher, std::shared_ptr<DirTree> tr
     }
 
     do {
-      if (strcmp(ffd.cFileName, ".") != 0 && strcmp(ffd.cFileName, "..") != 0) {
-        std::string fullPath = path + "\\" + ffd.cFileName;
+      std::string name = utf16ToUtf8(
+        ffd.cFileName,
+        static_cast<DWORD>(wcslen(ffd.cFileName))
+      );
+      if (name != "." && name != "..") {
+        std::string fullPath = path + "\\" + name;
         if (watcher->isIgnored(fullPath)) {
           continue;
         }
@@ -49,7 +51,7 @@ void BruteForceBackend::readTree(WatcherRef watcher, std::shared_ptr<DirTree> tr
           directories.push(fullPath);
         }
       }
-    } while (FindNextFile(hFind, &ffd) != 0);
+    } while (FindNextFileW(hFind, &ffd) != 0);
 
     FindClose(hFind);
   }

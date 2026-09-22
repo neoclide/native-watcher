@@ -384,6 +384,34 @@ test(
 );
 
 test(
+  'scans existing Unicode paths on Windows',
+  {skip: process.platform !== 'win32'},
+  async () => {
+    const directory = await fs.mkdtemp(
+      path.join(os.tmpdir(), '原生监听-'),
+    );
+    const nested = path.join(directory, '目录');
+    const file = path.join(nested, '已有.txt');
+    await fs.mkdir(nested);
+    await fs.writeFile(file, 'before');
+
+    const collector = new EventCollector();
+    const subscription = await watcher.subscribe(
+      directory,
+      collector.callback,
+    );
+    try {
+      const observed = collector.waitFor('update', file);
+      await fs.writeFile(file, 'after');
+      await observed;
+    } finally {
+      await subscription.unsubscribe();
+      await fs.rm(directory, {recursive: true, force: true});
+    }
+  },
+);
+
+test(
   'a FIFO event does not block other macOS subscriptions',
   {skip: process.platform !== 'darwin'},
   async () => {
