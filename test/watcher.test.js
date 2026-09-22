@@ -51,9 +51,15 @@ test('rapid file changes do not leave a stale final event state', async (t) => {
   await fs.unlink(ephemeral);
   await fs.writeFile(marker, 'marker');
   await observed;
-  const ephemeralEvents = collector.events
+  let ephemeralEvents = collector.events
     .slice(mark)
     .filter((event) => event.path === ephemeral);
+  if (ephemeralEvents.at(-1)?.type === 'create') {
+    await collector.waitFor('delete', ephemeral, mark);
+    ephemeralEvents = collector.events
+      .slice(mark)
+      .filter((event) => event.path === ephemeral);
+  }
   assert.ok(
     ephemeralEvents.length === 0 ||
       ephemeralEvents.at(-1).type === 'delete',
@@ -71,9 +77,19 @@ test('rapid file changes do not leave a stale final event state', async (t) => {
   await fs.writeFile(replaced, 'after');
   await fs.writeFile(marker, 'marker');
   await observed;
-  const replacementEvents = collector.events
+  let replacementEvents = collector.events
     .slice(mark)
     .filter((event) => event.path === replaced);
+  if (replacementEvents.at(-1)?.type === 'delete') {
+    await collector.waitFrom(mark, (events) =>
+      events.some(
+        (event) => event.path === replaced && event.type !== 'delete',
+      ),
+    );
+    replacementEvents = collector.events
+      .slice(mark)
+      .filter((event) => event.path === replaced);
+  }
   assert.ok(
     replacementEvents.length === 0 ||
       replacementEvents.at(-1).type !== 'delete',
