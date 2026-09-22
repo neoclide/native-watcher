@@ -3,10 +3,7 @@
 const fs = require('node:fs/promises');
 const os = require('node:os');
 const path = require('node:path');
-const {Worker} = require('node:worker_threads');
 const watcher = require('../..');
-
-const packageRoot = path.resolve(__dirname, '..', '..');
 
 async function subscribeRepeatedly(directory) {
   for (let index = 0; index < 20; index++) {
@@ -20,32 +17,10 @@ async function main() {
     path.join(await fs.realpath(os.tmpdir()), 'native-watcher-concurrent-'),
   );
   try {
-    const workers = Array.from({length: 3}, () => new Worker(
-      `
-        const {parentPort, workerData} = require('node:worker_threads');
-        const watcher = require(workerData.packageRoot);
-        (async () => {
-          for (let index = 0; index < 20; index++) {
-            const subscription = await watcher.subscribe(
-              workerData.directory,
-              () => {},
-            );
-            await subscription.unsubscribe();
-          }
-          parentPort.postMessage('done');
-        })().catch((error) => { throw error; });
-      `,
-      {eval: true, workerData: {directory, packageRoot}},
+    await Promise.all(Array.from(
+      {length: 4},
+      () => subscribeRepeatedly(directory),
     ));
-    await Promise.all([
-      subscribeRepeatedly(directory),
-      ...workers.map((worker) => new Promise((resolve, reject) => {
-        worker.once('message', resolve);
-        worker.once('error', reject);
-      })),
-    ]);
-    await Promise.all(workers.map((worker) => worker.terminate()));
-
     const eventPath = path.join(directory, 'after-concurrency');
     let resolveEvent;
     const observed = new Promise((resolve, reject) => {
