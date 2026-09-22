@@ -152,11 +152,14 @@ bool InotifyBackend::addCreatedTree(
     struct stat attributes;
     if (lstat(candidate.c_str(), &attributes) != 0) continue;
     bool isDirectory = S_ISDIR(attributes.st_mode);
-    tree->add(candidate, CONVERT_TIME(attributes.st_mtim), isDirectory);
-    watcher->mEvents.create(candidate);
+    bool existed = tree->find(candidate) != nullptr;
+    if (!existed) {
+      tree->add(candidate, CONVERT_TIME(attributes.st_mtim), isDirectory);
+      watcher->mEvents.create(candidate);
+    }
 
     if (isDirectory &&
-        (!watchDir(watcher, candidate, tree) ||
+        ((!existed && !watchDir(watcher, candidate, tree)) ||
          !addCreatedTree(watcher, candidate, tree))) {
       closedir(directory);
       return false;
@@ -394,13 +397,16 @@ bool InotifyBackend::handleSubscription(struct inotify_event *event, std::shared
       entry = sub->tree->add(path, CONVERT_TIME(st.st_mtim), S_ISDIR(st.st_mode));
     }
 
-    if (entry != nullptr && entry->isDir && !isMoveWithinRoot) {
-      bool success = watchDir(watcher, path, sub->tree);
-      if (success) {
+    if (entry != nullptr && entry->isDir) {
+      bool rescanMovedTree = isMoveWithinRoot && (
+        !watcher->mIgnorePaths.empty() || !watcher->mIgnoreGlobs.empty()
+      );
+      bool success = isMoveWithinRoot || watchDir(watcher, path, sub->tree);
+      if (success && (!isMoveWithinRoot || rescanMovedTree)) {
         success = addCreatedTree(watcher, path, sub->tree);
       }
       if (!success) {
-        sub->tree->remove(path);
+        if (!isMoveWithinRoot) sub->tree->remove(path);
         return false;
       }
     }

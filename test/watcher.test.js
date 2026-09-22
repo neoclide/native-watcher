@@ -234,6 +234,22 @@ test(
   },
 );
 
+test(
+  'watches a Linux subtree that becomes visible after its parent moves',
+  {skip: process.platform !== 'linux'},
+  async () => {
+    const fixture = path.join(
+      __dirname,
+      'fixtures',
+      'linux-chained-directory-renames.js',
+    );
+    const {stdout} = await execFileAsync(process.execPath, [fixture, 'ignore'], {
+      timeout: 15000,
+    });
+    assert.match(stdout, /renamed directory installs newly visible watches/);
+  },
+);
+
 test('stops watching every descendant of a directory moved out of the root', async () => {
   const tempRoot = await fs.realpath(os.tmpdir());
   const parent = await fs.mkdtemp(path.join(tempRoot, 'native-watcher-move-out-'));

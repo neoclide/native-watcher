@@ -21,10 +21,10 @@ async function waitFor(predicate, describe, timeout = 5000) {
   }
 }
 
-async function runChild(root) {
+async function runChild(root, options) {
   const subscription = await watcher.subscribe(root, (error, events) => {
     process.send({error: error?.message, events});
-  });
+  }, options);
   process.send({ready: true});
   process.on('message', async (message) => {
     if (message === 'close') {
@@ -48,7 +48,8 @@ async function runParent(mode) {
   await fs.mkdir(path.dirname(oldChild), {recursive: true});
   await fs.writeFile(oldChild, 'before');
 
-  const child = fork(__filename, ['child', root], {
+  const options = mode === 'ignore' ? {ignore: ['old/nested']} : {};
+  const child = fork(__filename, ['child', root, JSON.stringify(options)], {
     stdio: ['ignore', 'inherit', 'inherit', 'ipc'],
   });
   const messages = [];
@@ -68,9 +69,11 @@ async function runParent(mode) {
       await fs.rename(oldRoot, path.join(parent, 'outside'));
       await fs.mkdir(path.dirname(oldChild), {recursive: true});
       await fs.writeFile(oldChild, 'replacement');
-    } else {
+    } else if (mode === 'chain') {
       await fs.rename(oldRoot, middleRoot);
       await fs.rename(middleRoot, newRoot);
+    } else {
+      await fs.rename(oldRoot, newRoot);
     }
     child.kill('SIGCONT');
     await delay(200);
@@ -117,7 +120,7 @@ async function runParent(mode) {
 }
 
 if (process.argv[2] === 'child') {
-  runChild(process.argv[3]).catch((error) => {
+  runChild(process.argv[3], JSON.parse(process.argv[4])).catch((error) => {
     console.error(error);
     process.exitCode = 1;
   });
@@ -127,7 +130,9 @@ if (process.argv[2] === 'child') {
     () => console.log(
       mode === 'reuse'
         ? 'reused directory path remains watched'
-        : 'chained directory renames preserve descendant paths',
+        : mode === 'ignore'
+          ? 'renamed directory installs newly visible watches'
+          : 'chained directory renames preserve descendant paths',
     ),
     (error) => {
       console.error(error);
