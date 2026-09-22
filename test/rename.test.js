@@ -175,7 +175,17 @@ test(
       await fs.rm(directory, {recursive: true, force: true});
     });
 
-    const eventsPromise = waitForEvents(pending, (events) =>
+    // Flush FSEvents records queued while the startup index was built. Without
+    // this boundary, the pre-subscription create can legitimately coalesce
+    // with the rename into one final create event.
+    const barrier = path.join(directory, 'barrier.txt');
+    let eventsPromise = waitForEvents(pending, (events) =>
+      containsEvent(events, 'create', barrier),
+    );
+    await fs.writeFile(barrier, 'ready');
+    await eventsPromise;
+
+    eventsPromise = waitForEvents(pending, (events) =>
       containsRename(events, oldPath, newPath),
     );
     await fs.rename(oldPath, newPath);
