@@ -22,7 +22,7 @@ public:
   void releaseShared();
 
   void watch(WatcherRef watcher);
-  void unwatch(WatcherRef watcher);
+  void unwatch(WatcherRef watcher, bool force = false);
   void unref();
   void handleWatcherError(WatcherError &err);
   void invalidate(WatcherRef watcher);

@@ -84,8 +84,14 @@ public:
     );
 
     backend = selectedBackend;
-    callback = Napi::Persistent(fn);
-    addedCallback = watcher->watch(fn);
+    try {
+      callback = Napi::Persistent(fn);
+      addedCallback = watcher->watch(fn);
+      watcher->releaseShared();
+    } catch (...) {
+      watcher->releaseShared();
+      throw;
+    }
   }
 
   ~SubscribeRunner() override {
@@ -144,7 +150,13 @@ public:
     );
 
     backend = selectedBackend;
-    shouldUnwatch = watcher->unwatch(fn);
+    try {
+      shouldUnwatch = watcher->unwatch(fn);
+      watcher->releaseShared();
+    } catch (...) {
+      watcher->releaseShared();
+      throw;
+    }
   }
 
   ~UnsubscribeRunner() override {

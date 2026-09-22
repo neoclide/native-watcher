@@ -2,6 +2,7 @@
 #define WATCHER_H
 
 #include <condition_variable>
+#include <atomic>
 #include <unordered_set>
 #include <set>
 #include <node_api.h>
@@ -50,9 +51,11 @@ struct Watcher : public std::enable_shared_from_this<Watcher> {
   void notifyError(std::exception &err);
   bool watch(Function callback);
   bool unwatch(Function callback);
+  bool hasCallbacks();
   bool hasCallbacksForEnvironment(napi_env env);
   void addBackend(std::shared_ptr<Backend> backend);
   void removeBackend(Backend *backend);
+  void releaseShared();
   void unref();
   bool isIgnored(std::string path);
   void destroy();
@@ -68,6 +71,7 @@ private:
   uint64_t mNextCallbackId = 1;
   std::vector<std::weak_ptr<Backend>> mBackends;
   std::shared_ptr<Debounce> mDebounce;
+  std::atomic<size_t> mSharedReservations {0};
 
   std::vector<Callback>::iterator findCallback(Function callback);
   void clearCallbacks();

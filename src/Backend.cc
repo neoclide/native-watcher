@@ -159,8 +159,11 @@ void Backend::watch(WatcherRef watcher) {
   }
 }
 
-void Backend::unwatch(WatcherRef watcher) {
+void Backend::unwatch(WatcherRef watcher, bool force) {
   std::unique_lock<std::mutex> lock(mMutex);
+  if (!force && watcher->hasCallbacks()) {
+    return;
+  }
   size_t deleted = mSubscriptions.erase(watcher);
   bool wasInvalid = mInvalidSubscriptions.erase(watcher) > 0;
   if (deleted > 0) {
@@ -203,7 +206,7 @@ void Backend::releaseShared() {
 }
 
 void Backend::handleWatcherError(WatcherError &err) {
-  unwatch(err.mWatcher);
+  unwatch(err.mWatcher, true);
   err.mWatcher->notifyError(err);
 }
 

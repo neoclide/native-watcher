@@ -32,15 +32,18 @@ WatcherRef Watcher::getShared(std::string dir, std::unordered_set<std::string> i
   std::unique_lock<std::mutex> lock(getSharedWatchersMutex());
   auto found = getSharedWatchers().find(watcher);
   if (found != getSharedWatchers().end()) {
+    // Keep the registry identity alive until the caller has registered or
+    // removed its callback.
+    (*found)->mSharedReservations.fetch_add(1);
     return *found;
   }
 
+  watcher->mSharedReservations.fetch_add(1);
   getSharedWatchers().insert(watcher);
   return watcher;
 }
 
-void removeShared(Watcher *watcher) {
-  std::unique_lock<std::mutex> lock(getSharedWatchersMutex());
+void removeSharedLocked(Watcher *watcher) {
   for (auto it = getSharedWatchers().begin(); it != getSharedWatchers().end(); it++) {
     if (it->get() == watcher) {
       getSharedWatchers().erase(it);
@@ -249,19 +252,21 @@ bool Watcher::watch(Function callback) {
 
 // This is called by a ThreadSafeFunction on the callback's JavaScript thread.
 void Watcher::finishErrorCallback(uint64_t callbackId) {
-  std::unique_lock<std::mutex> lock(mMutex);
-  for (auto it = mCallbacks.begin(); it != mCallbacks.end(); it++) {
-    if (it->id == callbackId) {
-      it->tsfn.Release();
-      it->ref.Unref();
-      mCallbacks.erase(it);
-      break;
+  bool becameEmpty;
+  {
+    std::unique_lock<std::mutex> lock(mMutex);
+    for (auto it = mCallbacks.begin(); it != mCallbacks.end(); it++) {
+      if (it->id == callbackId) {
+        it->tsfn.Release();
+        it->ref.Unref();
+        mCallbacks.erase(it);
+        break;
+      }
     }
+    becameEmpty = mCallbacks.empty();
   }
 
-  if (mCallbacks.empty()) {
-    unref();
-  }
+  if (becameEmpty) unref();
 }
 
 bool Watcher::hasCallbacksForEnvironment(napi_env env) {
@@ -272,6 +277,11 @@ bool Watcher::hasCallbacksForEnvironment(napi_env env) {
     }
   }
   return false;
+}
+
+bool Watcher::hasCallbacks() {
+  std::unique_lock<std::mutex> lock(mMutex);
+  return !mCallbacks.empty();
 }
 
 void Watcher::addBackend(std::shared_ptr<Backend> backend) {
@@ -310,34 +320,44 @@ std::vector<Callback>::iterator Watcher::findCallback(Function callback) {
 
 // This should be called from the JavaScript thread.
 bool Watcher::unwatch(Function callback) {
-  std::unique_lock<std::mutex> lk(mMutex);
-
   bool removed = false;
-  auto it = findCallback(callback);
-  if (it != mCallbacks.end()) {
-    it->tsfn.Release();
-    it->ref.Unref();
-    mCallbacks.erase(it);
-    removed = true;
+  bool becameEmpty = false;
+  {
+    std::unique_lock<std::mutex> lk(mMutex);
+    auto it = findCallback(callback);
+    if (it != mCallbacks.end()) {
+      it->tsfn.Release();
+      it->ref.Unref();
+      mCallbacks.erase(it);
+      removed = true;
+    }
+    becameEmpty = removed && mCallbacks.empty();
   }
 
-  if (removed && mCallbacks.size() == 0) {
+  if (becameEmpty) unref();
+  return becameEmpty;
+}
+
+void Watcher::releaseShared() {
+  if (mSharedReservations.fetch_sub(1) == 1) {
     unref();
-    return true;
   }
-
-  return false;
 }
 
 void Watcher::unref() {
-  if (mCallbacks.size() == 0) {
-    removeShared(this);
+  std::unique_lock<std::mutex> registryLock(getSharedWatchersMutex());
+  std::unique_lock<std::mutex> lock(mMutex);
+  if (mCallbacks.empty() && mSharedReservations.load() == 0) {
+    removeSharedLocked(this);
   }
 }
 
 void Watcher::destroy() {
-  std::unique_lock<std::mutex> lk(mMutex);
-  clearCallbacks();
+  {
+    std::unique_lock<std::mutex> lk(mMutex);
+    clearCallbacks();
+  }
+  unref();
 }
 
 // Private because it doesn't lock.
@@ -348,7 +368,6 @@ void Watcher::clearCallbacks() {
   }
 
   mCallbacks.clear();
-  unref();
 }
 
 bool Watcher::isIgnored(std::string path) {
