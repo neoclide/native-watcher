@@ -20,7 +20,7 @@
     "test:rename": "node --test test/rename.test.js"
   },
   "engines": {
-    "node": ">=24"
+    "node": ">=22.20.0"
   },
   "dependencies": {
     "is-glob": "^4.0.3",
