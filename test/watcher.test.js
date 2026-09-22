@@ -183,8 +183,16 @@ test('remains usable when a subtree changes during initial scanning', async () =
     }
     subscription = await subscribing;
 
-    const child = path.join(current, 'child.txt');
-    const observed = collector.waitFor('update', child);
+    // Use a new path so a create queued by startup reconciliation cannot absorb
+    // this post-subscribe update in EventList's debounce batch.
+    const child = path.join(current, 'after-subscribe.txt');
+    let mark = collector.mark();
+    let observed = collector.waitFor('create', child, mark);
+    await fs.writeFile(child, 'before');
+    assertEvent(await observed, 'create', child);
+
+    mark = collector.mark();
+    observed = collector.waitFor('update', child, mark);
     await fs.appendFile(child, 'after');
     assertEvent(await observed, 'update', child);
   } finally {
