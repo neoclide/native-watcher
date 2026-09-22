@@ -300,6 +300,25 @@ test('removes subscriptions when their Worker environment exits', async () => {
 });
 
 test(
+  'waits for pending Windows directory reads before unsubscribe resolves',
+  {skip: process.platform !== 'win32'},
+  async () => {
+    const directory = await fs.mkdtemp(
+      path.join(os.tmpdir(), 'native-watcher-windows-stop-'),
+    );
+    try {
+      for (let index = 0; index < 25; index++) {
+        const subscription = await watcher.subscribe(directory, () => {});
+        await fs.writeFile(path.join(directory, `event-${index}`), 'event');
+        await subscription.unsubscribe();
+      }
+    } finally {
+      await fs.rm(directory, {recursive: true, force: true});
+    }
+  },
+);
+
+test(
   'a FIFO event does not block other macOS subscriptions',
   {skip: process.platform !== 'darwin'},
   async () => {

@@ -11,6 +11,8 @@ public:
   ~WindowsBackend();
   void subscribe(WatcherRef watcher) override;
   void unsubscribe(WatcherRef watcher) override;
+  void finishUnsubscribe(WatcherRef watcher) override;
+  bool isBackendThread() const;
 private:
   bool mRunning;
 };

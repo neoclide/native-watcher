@@ -15,6 +15,7 @@ public:
   virtual void start();
   virtual void subscribe(WatcherRef watcher) = 0;
   virtual void unsubscribe(WatcherRef watcher) = 0;
+  virtual void finishUnsubscribe(WatcherRef watcher) {}
 
   static std::shared_ptr<Backend> getShared(std::string backend);
 

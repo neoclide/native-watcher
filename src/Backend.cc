@@ -119,7 +119,15 @@ void Backend::unwatch(WatcherRef watcher) {
   std::unique_lock<std::mutex> lock(mMutex);
   size_t deleted = mSubscriptions.erase(watcher);
   if (deleted > 0) {
-    this->unsubscribe(watcher);
+    try {
+      this->unsubscribe(watcher);
+    } catch (...) {
+      mSubscriptions.insert(watcher);
+      throw;
+    }
+    lock.unlock();
+    this->finishUnsubscribe(watcher);
+    lock.lock();
     watcher->removeBackend(this);
     unref();
   }

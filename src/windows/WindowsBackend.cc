@@ -1,6 +1,7 @@
 #include <string>
 #include <stack>
 #include <cwchar>
+#include <atomic>
 #include "../DirTree.hh"
 #include "../shared/BruteForceBackend.hh"
 #include "./WindowsBackend.hh"
@@ -68,10 +69,13 @@ WindowsBackend::~WindowsBackend() {
   QueueUserAPC([](__in ULONG_PTR) {}, mThread.native_handle(), (ULONG_PTR)this);
 }
 
-class Subscription: public WatcherState {
+class Subscription:
+  public WatcherState,
+  public std::enable_shared_from_this<Subscription> {
 public:
   Subscription(WindowsBackend *backend, WatcherRef watcher, std::shared_ptr<DirTree> tree) {
     mRunning = true;
+    mPollPending = false;
     mBackend = backend;
     mWatcher = watcher;
     mTree = tree;
@@ -102,16 +106,22 @@ public:
     );
 
     if (!success) {
+      CloseHandle(mDirectoryHandle);
+      mDirectoryHandle = INVALID_HANDLE_VALUE;
       throw WatcherError("Could not get file information", mWatcher);
     }
 
     if (!(info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) {
+      CloseHandle(mDirectoryHandle);
+      mDirectoryHandle = INVALID_HANDLE_VALUE;
       throw WatcherError("Not a directory", mWatcher);
     }
   }
 
   virtual ~Subscription() {
-    stop();
+    if (mDirectoryHandle != INVALID_HANDLE_VALUE) {
+      CloseHandle(mDirectoryHandle);
+    }
   }
 
   void run() {
@@ -122,11 +132,30 @@ public:
     }
   }
 
-  void stop() {
-    if (mRunning) {
-      mRunning = false;
-      CancelIo(mDirectoryHandle);
-      CloseHandle(mDirectoryHandle);
+  void requestStop() {
+    if (mStopRequested.exchange(true)) {
+      return;
+    }
+
+    if (mBackend->isBackendThread()) {
+      beginStop();
+      return;
+    }
+
+    bool success = QueueUserAPC([](__in ULONG_PTR ptr) {
+      auto subscription = reinterpret_cast<Subscription *>(ptr);
+      auto keepAlive = subscription->shared_from_this();
+      subscription->beginStop();
+    }, mBackend->mThread.native_handle(), (ULONG_PTR)this);
+    if (!success) {
+      mStopRequested = false;
+      throw std::runtime_error("Unable to queue subscription stop");
+    }
+  }
+
+  void waitForStop() {
+    if (!mStopped) {
+      mStoppedSignal.wait();
     }
   }
 
@@ -147,6 +176,8 @@ public:
       &mOverlapped,
       [](DWORD errorCode, DWORD numBytes, LPOVERLAPPED overlapped) {
         auto subscription = reinterpret_cast<Subscription *>(overlapped->hEvent);
+        auto keepAlive = subscription->shared_from_this();
+        subscription->mPollPending = false;
         try {
           subscription->processEvents(errorCode);
         } catch (WatcherError &err) {
@@ -158,10 +189,12 @@ public:
     if (!success) {
       throw WatcherError("Failed to read changes", mWatcher);
     }
+    mPollPending = true;
   }
 
   void processEvents(DWORD errorCode) {
-    if (!mRunning) {
+    if (mStopRequested) {
+      finishStop();
       return;
     }
 
@@ -185,7 +218,7 @@ public:
           mWatcher->mEvents.remove(mWatcher->mDir);
           mTree->remove(mWatcher->mDir);
           mWatcher->notify();
-          stop();
+          requestStop();
           return;
         }
       }
@@ -323,10 +356,34 @@ public:
   }
 
 private:
+  void beginStop() {
+    mRunning = false;
+    if (mPollPending) {
+      CancelIoEx(mDirectoryHandle, &mOverlapped);
+    } else {
+      finishStop();
+    }
+  }
+
+  void finishStop() {
+    if (mStopped.exchange(true)) {
+      return;
+    }
+    if (mDirectoryHandle != INVALID_HANDLE_VALUE) {
+      CloseHandle(mDirectoryHandle);
+      mDirectoryHandle = INVALID_HANDLE_VALUE;
+    }
+    mStoppedSignal.notify();
+  }
+
   WindowsBackend *mBackend;
   std::shared_ptr<Watcher> mWatcher;
   std::shared_ptr<DirTree> mTree;
   bool mRunning;
+  bool mPollPending;
+  std::atomic<bool> mStopRequested {false};
+  std::atomic<bool> mStopped {false};
+  Signal mStoppedSignal;
   std::optional<std::string> mPendingRenamePath;
   uint64_t mRenameSequence = 0;
   HANDLE mDirectoryHandle;
@@ -343,16 +400,34 @@ void WindowsBackend::subscribe(WatcherRef watcher) {
 
   // Queue polling for this subscription in the correct thread.
   bool success = QueueUserAPC([](__in ULONG_PTR ptr) {
-    Subscription *sub = (Subscription *)ptr;
+    auto sub = reinterpret_cast<Subscription *>(ptr);
+    auto keepAlive = sub->shared_from_this();
     sub->run();
   }, mThread.native_handle(), (ULONG_PTR)sub.get());
 
   if (!success) {
+    watcher->state = nullptr;
     throw std::runtime_error("Unable to queue APC");
   }
 }
 
-// This function is called by Backend::unwatch which takes a lock on mMutex
+// Start cancellation while Backend::unwatch still retains the watcher state.
 void WindowsBackend::unsubscribe(WatcherRef watcher) {
+  auto sub = std::static_pointer_cast<Subscription>(watcher->state);
+  if (sub != nullptr) {
+    sub->requestStop();
+  }
+}
+
+// Wait outside the Backend lock so the completion callback can report errors.
+void WindowsBackend::finishUnsubscribe(WatcherRef watcher) {
+  auto sub = std::static_pointer_cast<Subscription>(watcher->state);
+  if (sub != nullptr) {
+    sub->waitForStop();
+  }
   watcher->state = nullptr;
+}
+
+bool WindowsBackend::isBackendThread() const {
+  return mThread.get_id() == std::this_thread::get_id();
 }
