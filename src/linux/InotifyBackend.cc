@@ -202,7 +202,16 @@ bool InotifyBackend::addCreatedTree(
     if (isDirectory &&
         (!watchDir(watcher, candidate, tree) ||
          !addCreatedTree(watcher, candidate, tree, reportEvents))) {
+      int error = errno;
+      if (error == ENOENT || error == ENOTDIR) {
+        // The entry moved or changed type between lstat and opening it.
+        // Its queued parent event will reconcile the final path.
+        removeSubscriptions(watcher.get(), candidate);
+        tree->remove(candidate);
+        continue;
+      }
       closedir(directory);
+      errno = error;
       return false;
     }
   }
@@ -407,6 +416,7 @@ bool InotifyBackend::handleSubscription(struct inotify_event *event, std::shared
     }
 
     bool isMoveWithinRoot = pending != pendingMoves.end();
+    bool missingSource = false;
     std::string oldPath;
     PendingInotifyMove *move = nullptr;
     if (isMoveWithinRoot) {
@@ -431,6 +441,7 @@ bool InotifyBackend::handleSubscription(struct inotify_event *event, std::shared
       if (sub->tree->find(path) != nullptr) {
         sub->tree->remove(path);
       }
+      missingSource = move->entries.empty();
       sub->tree->restore(std::move(move->entries), oldPath, path);
       moveSubscriptions(*move, path);
       pendingMoves.erase(pending);
@@ -445,15 +456,23 @@ bool InotifyBackend::handleSubscription(struct inotify_event *event, std::shared
     DirEntry *entry;
     if (isMoveWithinRoot) {
       entry = sub->tree->update(path, CONVERT_TIME(st.st_mtim));
+      if (entry == nullptr) {
+        entry = sub->tree->add(path, CONVERT_TIME(st.st_mtim), S_ISDIR(st.st_mode));
+        missingSource = true;
+      }
     } else {
       entry = sub->tree->add(path, CONVERT_TIME(st.st_mtim), S_ISDIR(st.st_mode));
     }
 
     if (entry != nullptr && entry->isDir) {
+      // A move queued during the initial scan may have no indexed source or
+      // directory watch to carry to its destination.
       bool rescanMovedTree = isMoveWithinRoot && (
-        !watcher->mIgnorePaths.empty() || !watcher->mIgnoreGlobs.empty()
+        missingSource || !watcher->mIgnorePaths.empty() ||
+        !watcher->mIgnoreGlobs.empty()
       );
-      bool success = isMoveWithinRoot || watchDir(watcher, path, sub->tree);
+      bool success = (isMoveWithinRoot && !missingSource) ||
+        watchDir(watcher, path, sub->tree);
       if (success && (!isMoveWithinRoot || rescanMovedTree)) {
         success = addCreatedTree(watcher, path, sub->tree);
       }
