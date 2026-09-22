@@ -365,6 +365,39 @@ test(
 );
 
 test(
+  'scans directories whose dirent type is unknown on Linux',
+  {skip: process.platform !== 'linux'},
+  async () => {
+    const tempDirectory = await fs.mkdtemp(
+      path.join(os.tmpdir(), 'native-watcher-dirent-shim-'),
+    );
+    try {
+      const shim = path.join(tempDirectory, 'unknown-dirent.so');
+      await execFileAsync('cc', [
+        '-shared',
+        '-fPIC',
+        '-o',
+        shim,
+        path.join(__dirname, 'fixtures', 'unknown-dirent.c'),
+        '-ldl',
+      ]);
+      const fixture = path.join(
+        __dirname,
+        'fixtures',
+        'unknown-dirent-scan.js',
+      );
+      const {stdout} = await execFileAsync(process.execPath, [fixture], {
+        env: {...process.env, LD_PRELOAD: shim},
+        timeout: 5000,
+      });
+      assert.match(stdout, /DT_UNKNOWN directory watched/);
+    } finally {
+      await fs.rm(tempDirectory, {recursive: true, force: true});
+    }
+  },
+);
+
+test(
   'waits for pending Windows directory reads before unsubscribe resolves',
   {skip: process.platform !== 'win32'},
   async () => {

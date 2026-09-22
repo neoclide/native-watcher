@@ -36,10 +36,21 @@ void iterateDir(WatcherRef watcher, const std::shared_ptr <DirTree> tree, const 
     }
 
     struct stat rootAttributes;
-    fstatat(new_fd, ".", &rootAttributes, AT_SYMLINK_NOFOLLOW);
+    if (fstatat(new_fd, ".", &rootAttributes, AT_SYMLINK_NOFOLLOW) == -1) {
+        int error = errno;
+        close(new_fd);
+        throw WatcherError(strerror(error), watcher);
+    }
     tree->add(dirname, CONVERT_TIME(rootAttributes.st_mtim), true);
 
-    if (DIR *dir = fdopendir(new_fd)) {
+    DIR *dir = fdopendir(new_fd);
+    if (dir == nullptr) {
+        int error = errno;
+        close(new_fd);
+        throw WatcherError(strerror(error), watcher);
+    }
+
+    try {
         while (struct dirent *ent = (errno = 0, readdir(dir))) {
             if (ISDOT(ent->d_name)) continue;
 
@@ -47,8 +58,15 @@ void iterateDir(WatcherRef watcher, const std::shared_ptr <DirTree> tree, const 
 
             if (!watcher->isIgnored(fullPath)) {
                 struct stat attrib;
-                fstatat(new_fd, ent->d_name, &attrib, AT_SYMLINK_NOFOLLOW);
-                bool isDir = ent->d_type == DT_DIR;
+                if (fstatat(
+                    new_fd,
+                    ent->d_name,
+                    &attrib,
+                    AT_SYMLINK_NOFOLLOW
+                ) == -1) {
+                    throw WatcherError(strerror(errno), watcher);
+                }
+                bool isDir = S_ISDIR(attrib.st_mode);
 
                 if (isDir) {
                     iterateDir(watcher, tree, ent->d_name, new_fd, fullPath);
@@ -57,21 +75,29 @@ void iterateDir(WatcherRef watcher, const std::shared_ptr <DirTree> tree, const 
                 }
             }
         }
-
+    } catch (...) {
         closedir(dir);
-    } else {
-        close(new_fd);
+        throw;
     }
 
-    if (errno) {
-        throw WatcherError(strerror(errno), watcher);
+    int readError = errno;
+    closedir(dir);
+    if (readError) {
+        throw WatcherError(strerror(readError), watcher);
     }
 }
 
 void BruteForceBackend::readTree(WatcherRef watcher, std::shared_ptr <DirTree> tree) {
     int fd = open(watcher->mDir.c_str(), O_RDONLY);
-    if (fd) {
-        iterateDir(watcher, tree, ".", fd, watcher->mDir);
-        close(fd);
+    if (fd == -1) {
+        throw WatcherError(strerror(errno), watcher);
     }
+
+    try {
+        iterateDir(watcher, tree, ".", fd, watcher->mDir);
+    } catch (...) {
+        close(fd);
+        throw;
+    }
+    close(fd);
 }
