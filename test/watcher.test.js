@@ -413,6 +413,18 @@ test(
 );
 
 test(
+  'rejects a Linux FIFO root without blocking other subscriptions',
+  {skip: process.platform !== 'linux'},
+  async () => {
+    const fixture = path.join(__dirname, 'fixtures', 'linux-fifo-root.js');
+    const {stdout} = await execFileAsync(process.execPath, [fixture], {
+      timeout: 5000,
+    });
+    assert.match(stdout, /FIFO root rejected without blocking backend/);
+  },
+);
+
+test(
   'scans directories whose dirent type is unknown on Linux',
   {skip: process.platform !== 'linux'},
   async () => {

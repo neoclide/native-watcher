@@ -88,7 +88,10 @@ void iterateDir(WatcherRef watcher, const std::shared_ptr <DirTree> tree, const 
 }
 
 void BruteForceBackend::readTree(WatcherRef watcher, std::shared_ptr <DirTree> tree) {
-    int fd = open(watcher->mDir.c_str(), O_RDONLY);
+    int fd = open(
+        watcher->mDir.c_str(),
+        O_RDONLY | O_CLOEXEC | O_DIRECTORY | O_NOCTTY | O_NONBLOCK
+    );
     if (fd == -1) {
         throw WatcherError(strerror(errno), watcher);
     }
