@@ -194,6 +194,38 @@ test(
 );
 
 test(
+  'correlates a case-only rename on macOS',
+  {skip: process.platform !== 'darwin'},
+  async (t) => {
+    const tempDirectory = await fs.realpath(os.tmpdir());
+    const directory = await fs.mkdtemp(path.join(tempDirectory, 'native-watcher-'));
+    const pending = [];
+    const subscription = await watcher.subscribe(directory, (error, events) => {
+      dispatchEvents(pending, error, events);
+    });
+
+    t.after(async () => {
+      await subscription.unsubscribe();
+      await fs.rm(directory, {recursive: true, force: true});
+    });
+
+    const oldPath = path.join(directory, 'case-name.txt');
+    const newPath = path.join(directory, 'CASE-name.txt');
+    let eventsPromise = waitForEvents(pending, (events) =>
+      containsEvent(events, 'create', oldPath),
+    );
+    await fs.writeFile(oldPath, 'content');
+    await eventsPromise;
+
+    eventsPromise = waitForEvents(pending, (events) =>
+      containsRename(events, oldPath, newPath),
+    );
+    await fs.rename(oldPath, newPath);
+    assertRename(await eventsPromise, oldPath, newPath);
+  },
+);
+
+test(
   'does not infer a macOS rename from ambiguous hard-link identity',
   {skip: process.platform !== 'darwin'},
   async (t) => {

@@ -1,8 +1,9 @@
 #include "IdentityIndex.hh"
 
-#include <fcntl.h>
 #include <fts.h>
+#include <sys/attr.h>
 #include <unistd.h>
+#include <algorithm>
 #include <cerrno>
 #include <cstring>
 #include <functional>
@@ -22,14 +23,73 @@ bool hasPathPrefix(
 }
 
 bool pathHasExactCase(const std::string &path) {
-  int fd = open(path.c_str(), O_RDONLY | O_SYMLINK);
-  if (fd == -1) return false;
+  if (path.empty() || path[0] != '/') return false;
 
-  char canonicalPath[PATH_MAX];
-  bool result = fcntl(fd, F_GETPATH, canonicalPath) != -1 &&
-    path == canonicalPath;
-  close(fd);
-  return result;
+  struct AttributeBuffer {
+    uint32_t length;
+    attrreference_t name;
+    char value[PATH_MAX];
+  } __attribute__((aligned(4), packed));
+
+  struct attrlist attributes {};
+  attributes.bitmapcount = ATTR_BIT_MAP_COUNT;
+  attributes.commonattr = ATTR_CMN_NAME;
+
+  size_t componentStart = 1;
+  while (componentStart < path.size()) {
+    size_t componentEnd = path.find('/', componentStart);
+    if (componentEnd == std::string::npos) componentEnd = path.size();
+    if (componentEnd == componentStart) {
+      componentStart++;
+      continue;
+    }
+
+    std::string prefix = path.substr(0, componentEnd);
+    AttributeBuffer buffer {};
+    if (getattrlist(
+      prefix.c_str(),
+      &attributes,
+      &buffer,
+      sizeof(buffer),
+      FSOPT_NOFOLLOW
+    ) != 0) {
+      return false;
+    }
+
+    const char *bufferStart = reinterpret_cast<const char *>(&buffer);
+    size_t returnedLength = std::min<size_t>(
+      buffer.length,
+      sizeof(buffer)
+    );
+    size_t nameFieldOffset =
+      reinterpret_cast<const char *>(&buffer.name) - bufferStart;
+    if (
+      buffer.name.attr_dataoffset < 0 ||
+      nameFieldOffset + buffer.name.attr_dataoffset >= returnedLength ||
+      buffer.name.attr_length == 0 ||
+      returnedLength - nameFieldOffset - buffer.name.attr_dataoffset <
+        buffer.name.attr_length
+    ) {
+      return false;
+    }
+
+    const char *actualName = bufferStart + nameFieldOffset +
+      buffer.name.attr_dataoffset;
+    if (
+      actualName[buffer.name.attr_length - 1] != '\0'
+    ) {
+      return false;
+    }
+
+    std::string expectedName = path.substr(
+      componentStart,
+      componentEnd - componentStart
+    );
+    if (expectedName != actualName) return false;
+    componentStart = componentEnd + 1;
+  }
+
+  return true;
 }
 
 IndexedPath fromStat(const struct stat &file) {

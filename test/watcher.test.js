@@ -1,6 +1,7 @@
 'use strict';
 
 const assert = require('node:assert/strict');
+const fsSync = require('node:fs');
 const fs = require('node:fs/promises');
 const os = require('node:os');
 const path = require('node:path');
@@ -227,6 +228,94 @@ test('removes subscriptions when their Worker environment exits', async () => {
   });
   assert.match(stdout, /worker cleanup ok/);
 });
+
+test(
+  'a FIFO event does not block other macOS subscriptions',
+  {skip: process.platform !== 'darwin'},
+  async () => {
+    const tempRoot = await fs.realpath(os.tmpdir());
+    const firstDirectory = await fs.mkdtemp(
+      path.join(tempRoot, 'native-watcher-fifo-'),
+    );
+    const secondDirectory = await fs.mkdtemp(
+      path.join(tempRoot, 'native-watcher-other-'),
+    );
+    const first = new EventCollector();
+    const second = new EventCollector();
+    const firstSubscription = await watcher.subscribe(
+      firstDirectory,
+      first.callback,
+    );
+    const secondSubscription = await watcher.subscribe(
+      secondDirectory,
+      second.callback,
+    );
+    const fifo = path.join(firstDirectory, 'pipe');
+
+    try {
+      await execFileAsync('mkfifo', [fifo]);
+      await new Promise((resolve) => setTimeout(resolve, 500));
+
+      const otherFile = path.join(secondDirectory, 'still-responsive');
+      const mark = second.mark();
+      const observed = second.waitFrom(
+        mark,
+        (events) => events.some((event) => event.path === otherFile),
+        1500,
+      );
+      await fs.writeFile(otherFile, 'event');
+      await observed;
+    } finally {
+      try {
+        const fd = fsSync.openSync(
+          fifo,
+          fsSync.constants.O_WRONLY | fsSync.constants.O_NONBLOCK,
+        );
+        fsSync.closeSync(fd);
+      } catch (error) {
+        if (error.code !== 'ENXIO' && error.code !== 'ENOENT') throw error;
+      }
+      await Promise.all([
+        firstSubscription.unsubscribe(),
+        secondSubscription.unsubscribe(),
+      ]);
+      await Promise.all([
+        fs.rm(firstDirectory, {recursive: true, force: true}),
+        fs.rm(secondDirectory, {recursive: true, force: true}),
+      ]);
+    }
+  },
+);
+
+test(
+  'reports updates to a write-only file on macOS',
+  {skip: process.platform !== 'darwin'},
+  async (t) => {
+    let file;
+    const {directory, collector} = await createFixture(
+      t,
+      undefined,
+      async (root) => {
+        file = path.join(root, 'write-only');
+        await fs.writeFile(file, 'before', {mode: 0o200});
+      },
+    );
+
+    const barrier = path.join(directory, 'barrier');
+    let mark = collector.mark();
+    let observed = collector.waitFor('create', barrier, mark);
+    await fs.writeFile(barrier, 'ready');
+    await observed;
+
+    mark = collector.mark();
+    observed = collector.waitFor('update', file, mark);
+    await fs.appendFile(file, 'after');
+    const events = await observed;
+    assert.ok(
+      events.every((event) => event.type !== 'delete' || event.path !== file),
+    );
+  },
+);
 
 test('keeps different ignore options separate for the same directory', async (t) => {
   let firstExisting;
