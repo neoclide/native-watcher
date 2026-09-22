@@ -3,7 +3,7 @@ export type EventType = 'create' | 'update' | 'delete';
 export interface WatchEvent {
   path: string;
   type: EventType;
-  /** Present on both sides of a rename when the OS reports an exact pair. */
+  /** Present on both sides when the native backend reliably correlates a rename. */
   renameId?: string;
 }
 

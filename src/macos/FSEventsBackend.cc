@@ -1,10 +1,15 @@
 #include <CoreServices/CoreServices.h>
 #include <sys/stat.h>
+#include <algorithm>
+#include <mutex>
 #include <string>
+#include <unordered_map>
 #include <unordered_set>
+#include <vector>
 #include "../Event.hh"
 #include "../Backend.hh"
 #include "./FSEventsBackend.hh"
+#include "./IdentityIndex.hh"
 #include "../Watcher.hh"
 
 #define CONVERT_TIME(ts) ((uint64_t)ts.tv_sec * 1000000000 + ts.tv_nsec)
@@ -17,32 +22,410 @@ void stopStream(FSEventStreamRef stream, CFRunLoopRef runLoop) {
   FSEventStreamRelease(stream);
 }
 
-// macOS has a case insensitive file system by default. In order to detect
-// file renames that only affect case, we need to get the canonical path
-// and compare it with the input path to determine if a file was created or deleted.
-bool pathExists(char *path) {
-  int fd = open(path, O_RDONLY | O_SYMLINK);
-  if (fd == -1) {
-    return false;
-  }
-
-  char buf[PATH_MAX];
-  if (fcntl(fd, F_GETPATH, buf) == -1) {
-    close(fd);
-    return false;
-  }
-
-  bool res = strncmp(path, buf, PATH_MAX) == 0;
-  close(fd);
-  return res;
-}
+struct PendingEvent {
+  std::string path;
+  FSEventStreamEventFlags flags;
+  FSEventStreamEventId id;
+};
 
 class State: public WatcherState {
 public:
   FSEventStreamRef stream;
   std::shared_ptr<DirTree> tree;
-  uint64_t since;
+  IdentityIndex identities;
+  std::mutex initializationMutex;
+  std::vector<PendingEvent> pendingEvents;
+  uint64_t renameSequence = 0;
+  bool initializing = true;
 };
+
+bool hasFlag(FSEventStreamEventFlags flags, FSEventStreamEventFlags flag) {
+  return (flags & flag) == flag;
+}
+
+using RenameCandidates = std::unordered_map<
+  FileIdentity,
+  std::unordered_map<std::string, IndexedPath>,
+  FileIdentityHash
+>;
+
+std::unordered_set<std::string> correlateRenames(
+  WatcherRef watcher,
+  State *state,
+  const std::vector<PendingEvent> &events
+) {
+  RenameCandidates removed;
+  RenameCandidates created;
+
+  for (const auto &event : events) {
+    if (!hasFlag(event.flags, kFSEventStreamEventFlagItemRenamed) ||
+        watcher->isIgnored(event.path)) {
+      continue;
+    }
+
+    const IndexedPath *before = state->identities.find(event.path);
+    auto after = readIndexedPath(event.path);
+    if (before != nullptr &&
+        (!after.has_value() || !(before->identity == after->identity))) {
+      removed[before->identity].insert_or_assign(event.path, *before);
+    }
+    if (after.has_value() &&
+        (before == nullptr || !(before->identity == after->identity))) {
+      created[after->identity].insert_or_assign(event.path, *after);
+    }
+  }
+
+  std::unordered_set<std::string> handled;
+  for (const auto &removedIdentity : removed) {
+    auto matchingCreated = created.find(removedIdentity.first);
+    if (removedIdentity.second.size() != 1 ||
+        matchingCreated == created.end() ||
+        matchingCreated->second.size() != 1 ||
+        state->identities.pathCount(removedIdentity.first) != 1) {
+      continue;
+    }
+
+    const auto &oldCandidate = *removedIdentity.second.begin();
+    const auto &newCandidate = *matchingCreated->second.begin();
+    const IndexedPath &oldEntry = oldCandidate.second;
+    const IndexedPath &newEntry = newCandidate.second;
+
+    // A pre-existing target is a replacement, and multiple links make inode
+    // identity insufficient to prove which directory entry was renamed.
+    if (state->identities.find(newCandidate.first) != nullptr ||
+        oldEntry.isDirectory != newEntry.isDirectory ||
+        (!oldEntry.isDirectory &&
+         (oldEntry.linkCount != 1 || newEntry.linkCount != 1))) {
+      continue;
+    }
+
+    std::string renameId =
+      "fsevents:" + std::to_string(++state->renameSequence);
+    watcher->mEvents.rename(
+      oldCandidate.first,
+      newCandidate.first,
+      renameId
+    );
+
+    state->identities.rename(oldCandidate.first, newCandidate.first);
+    state->identities.add(newCandidate.first, newEntry);
+    state->tree->remove(oldCandidate.first);
+    state->tree->add(
+      newCandidate.first,
+      newEntry.mtime,
+      newEntry.isDirectory
+    );
+    handled.insert(oldCandidate.first);
+    handled.insert(newCandidate.first);
+  }
+
+  return handled;
+}
+
+bool isDescendantPath(
+  const std::string &path,
+  const std::string &directory
+) {
+  return path.size() > directory.size() &&
+    path.compare(0, directory.size(), directory) == 0 &&
+    path[directory.size()] == '/';
+}
+
+struct ReconciledRename {
+  std::string oldPath;
+  std::string newPath;
+  IndexedPath entry;
+};
+
+void reconcileFullTree(WatcherRef watcher, State *state) {
+  auto newTree = std::make_shared<DirTree>(watcher->mDir);
+  IdentityIndex current = scanIdentityIndex(
+    watcher->mDir,
+    [watcher](const std::string &path) {
+      return watcher->isIgnored(path);
+    },
+    [newTree](const std::string &path, const IndexedPath &entry) {
+      newTree->add(path, entry.mtime, entry.isDirectory);
+    }
+  );
+
+  RenameCandidates removed;
+  RenameCandidates created;
+  for (const auto &before : state->identities.entries()) {
+    const IndexedPath *after = current.find(before.first);
+    if (after == nullptr || !(after->identity == before.second.identity)) {
+      removed[before.second.identity].insert_or_assign(
+        before.first,
+        before.second
+      );
+    }
+  }
+  for (const auto &after : current.entries()) {
+    const IndexedPath *before = state->identities.find(after.first);
+    if (before == nullptr || !(before->identity == after.second.identity)) {
+      created[after.second.identity].insert_or_assign(
+        after.first,
+        after.second
+      );
+    }
+  }
+
+  std::vector<ReconciledRename> possibleRenames;
+  for (const auto &removedIdentity : removed) {
+    auto matchingCreated = created.find(removedIdentity.first);
+    if (removedIdentity.second.size() != 1 ||
+        matchingCreated == created.end() ||
+        matchingCreated->second.size() != 1 ||
+        state->identities.pathCount(removedIdentity.first) != 1 ||
+        current.pathCount(removedIdentity.first) != 1) {
+      continue;
+    }
+
+    const auto &oldCandidate = *removedIdentity.second.begin();
+    const auto &newCandidate = *matchingCreated->second.begin();
+    if (state->identities.find(newCandidate.first) != nullptr ||
+        oldCandidate.second.isDirectory != newCandidate.second.isDirectory ||
+        (!oldCandidate.second.isDirectory &&
+         (oldCandidate.second.linkCount != 1 ||
+          newCandidate.second.linkCount != 1))) {
+      continue;
+    }
+
+    possibleRenames.push_back(ReconciledRename {
+      oldCandidate.first,
+      newCandidate.first,
+      newCandidate.second
+    });
+  }
+
+  std::sort(
+    possibleRenames.begin(),
+    possibleRenames.end(),
+    [](const ReconciledRename &left, const ReconciledRename &right) {
+      if (left.entry.isDirectory != right.entry.isDirectory) {
+        return left.entry.isDirectory;
+      }
+      return left.oldPath.size() < right.oldPath.size();
+    }
+  );
+
+  std::vector<ReconciledRename> acceptedRenames;
+  std::unordered_set<std::string> handledRemoved;
+  std::unordered_set<std::string> handledCreated;
+  for (const auto &candidate : possibleRenames) {
+    bool coveredByDirectory = false;
+    for (const auto &accepted : acceptedRenames) {
+      if (!accepted.entry.isDirectory ||
+          !isDescendantPath(candidate.oldPath, accepted.oldPath)) {
+        continue;
+      }
+      std::string expectedNewPath =
+        accepted.newPath + candidate.oldPath.substr(accepted.oldPath.size());
+      if (candidate.newPath == expectedNewPath) {
+        coveredByDirectory = true;
+        break;
+      }
+    }
+
+    if (!coveredByDirectory) {
+      acceptedRenames.push_back(candidate);
+      watcher->mEvents.rename(
+        candidate.oldPath,
+        candidate.newPath,
+        "fsevents:" + std::to_string(++state->renameSequence)
+      );
+    }
+    handledRemoved.insert(candidate.oldPath);
+    handledCreated.insert(candidate.newPath);
+  }
+
+  // A directory rename accounts for unchanged descendants even when a full
+  // rescan observed each child as a removed and added path.
+  for (const auto &accepted : acceptedRenames) {
+    if (!accepted.entry.isDirectory) continue;
+    for (const auto &entry : removed) {
+      for (const auto &path : entry.second) {
+        if (!isDescendantPath(path.first, accepted.oldPath)) continue;
+        std::string newPath =
+          accepted.newPath + path.first.substr(accepted.oldPath.size());
+        const IndexedPath *newEntry = current.find(newPath);
+        if (newEntry != nullptr &&
+            newEntry->identity == path.second.identity) {
+          handledRemoved.insert(path.first);
+          handledCreated.insert(newPath);
+        }
+      }
+    }
+  }
+
+  for (const auto &entry : removed) {
+    for (const auto &path : entry.second) {
+      if (handledRemoved.count(path.first) == 0) {
+        watcher->mEvents.remove(path.first);
+      }
+    }
+  }
+  for (const auto &entry : created) {
+    for (const auto &path : entry.second) {
+      if (handledCreated.count(path.first) == 0) {
+        watcher->mEvents.create(path.first);
+      }
+    }
+  }
+  for (const auto &after : current.entries()) {
+    const IndexedPath *before = state->identities.find(after.first);
+    if (before != nullptr && before->identity == after.second.identity &&
+        !after.second.isDirectory && before->mtime != after.second.mtime) {
+      watcher->mEvents.update(after.first);
+    }
+  }
+
+  state->identities = std::move(current);
+  state->tree = std::move(newTree);
+}
+
+void processEvents(
+  ConstFSEventStreamRef streamRef,
+  WatcherRef watcher,
+  const std::vector<PendingEvent> &events
+) {
+  if (watcher->state == nullptr) return;
+
+  auto stateGuard = watcher->state;
+  auto *state = static_cast<State *>(stateGuard.get());
+  EventList &list = watcher->mEvents;
+  bool deletedRoot = false;
+
+  bool requiresRescan = std::any_of(
+    events.begin(),
+    events.end(),
+    [](const PendingEvent &event) {
+      return hasFlag(
+        event.flags,
+        kFSEventStreamEventFlagMustScanSubDirs
+      );
+    }
+  );
+  if (requiresRescan) {
+    try {
+      reconcileFullTree(watcher, state);
+    } catch (const std::exception &error) {
+      list.error(error.what());
+    }
+    watcher->notify();
+    return;
+  }
+
+  auto correlatedPaths = correlateRenames(watcher, state, events);
+
+  for (const auto &event : events) {
+    bool isCreated = hasFlag(event.flags, kFSEventStreamEventFlagItemCreated);
+    bool isRemoved = hasFlag(event.flags, kFSEventStreamEventFlagItemRemoved);
+    bool isModified =
+      hasFlag(event.flags, kFSEventStreamEventFlagItemModified) ||
+      hasFlag(event.flags, kFSEventStreamEventFlagItemInodeMetaMod) ||
+      hasFlag(event.flags, kFSEventStreamEventFlagItemFinderInfoMod) ||
+      hasFlag(event.flags, kFSEventStreamEventFlagItemChangeOwner) ||
+      hasFlag(event.flags, kFSEventStreamEventFlagItemXattrMod);
+    bool isRenamed = hasFlag(event.flags, kFSEventStreamEventFlagItemRenamed);
+    bool isDone = hasFlag(event.flags, kFSEventStreamEventFlagHistoryDone);
+    bool isDir = hasFlag(event.flags, kFSEventStreamEventFlagItemIsDir);
+
+    if (isDone) {
+      watcher->notify();
+      break;
+    }
+
+    auto ignoredFlags = IGNORED_FLAGS;
+    if (__builtin_available(macOS 10.13, *)) {
+      ignoredFlags |= kFSEventStreamEventFlagItemCloned;
+    }
+    if ((event.flags & ~ignoredFlags) == 0 ||
+        watcher->isIgnored(event.path) ||
+        correlatedPaths.count(event.path) > 0) {
+      continue;
+    }
+
+    if (isCreated && !(isRemoved || isModified || isRenamed)) {
+      auto entry = readIndexedPath(event.path);
+      if (entry.has_value()) {
+        state->identities.add(event.path, *entry);
+        state->tree->add(event.path, entry->mtime, entry->isDirectory);
+      } else {
+        state->tree->add(event.path, 0, isDir);
+      }
+      list.create(event.path);
+    } else if (isRemoved && !(isCreated || isModified || isRenamed)) {
+      state->identities.remove(event.path);
+      state->tree->remove(event.path);
+      list.remove(event.path);
+      if (event.path == watcher->mDir) deletedRoot = true;
+    } else if (isModified && !(isCreated || isRemoved || isRenamed)) {
+      auto indexed = readIndexedPath(event.path);
+      if (!indexed.has_value()) continue;
+
+      const IndexedPath *previousIdentity =
+        state->identities.find(event.path);
+      bool sameIdentity = previousIdentity != nullptr &&
+        previousIdentity->identity == indexed->identity;
+      DirEntry *entry = state->tree->find(event.path);
+      if (entry && sameIdentity && entry->mtime == indexed->mtime &&
+          indexed->mtime % 1000000000 != 0) {
+        continue;
+      }
+
+      state->identities.add(event.path, *indexed);
+      if (entry) {
+        entry->mtime = indexed->mtime;
+      } else {
+        state->tree->add(
+          event.path,
+          indexed->mtime,
+          indexed->isDirectory
+        );
+      }
+      list.update(event.path);
+    } else {
+      auto indexed = readIndexedPath(event.path);
+      if (!indexed.has_value()) {
+        state->identities.remove(event.path);
+        state->tree->remove(event.path);
+        list.remove(event.path);
+        if (event.path == watcher->mDir) deletedRoot = true;
+        continue;
+      }
+
+      const IndexedPath *previousIdentity =
+        state->identities.find(event.path);
+      bool sameIdentity = previousIdentity != nullptr &&
+        previousIdentity->identity == indexed->identity;
+      DirEntry *entry = state->tree->find(event.path);
+      if (entry && sameIdentity && entry->mtime == indexed->mtime &&
+          indexed->mtime % 1000000000 != 0) {
+        continue;
+      }
+
+      state->identities.add(event.path, *indexed);
+      if (isModified && entry) {
+        state->tree->update(event.path, indexed->mtime);
+        list.update(event.path);
+      } else {
+        state->tree->add(
+          event.path,
+          indexed->mtime,
+          indexed->isDirectory
+        );
+        list.create(event.path);
+      }
+    }
+  }
+
+  watcher->notify();
+  if (deletedRoot) {
+    stopStream((FSEventStreamRef)streamRef, CFRunLoopGetCurrent());
+    watcher->state = nullptr;
+  }
+}
 
 void FSEventsCallback(
   ConstFSEventStreamRef streamRef,
@@ -54,141 +437,29 @@ void FSEventsCallback(
 ) {
   char **paths = (char **)eventPaths;
   std::shared_ptr<Watcher>& watcher = *static_cast<std::shared_ptr<Watcher> *>(clientCallBackInfo);
+  if (watcher->state == nullptr) return;
 
-  EventList& list = watcher->mEvents;
-  if (watcher->state == nullptr) {
-      return;
+  std::vector<PendingEvent> events;
+  events.reserve(numEvents);
+  for (size_t i = 0; i < numEvents; ++i) {
+    events.push_back(PendingEvent {paths[i], eventFlags[i], eventIds[i]});
   }
 
   auto stateGuard = watcher->state;
-  auto* state = static_cast<State*>(stateGuard.get());
-  uint64_t since = state->since;
-  bool deletedRoot = false;
-
-  for (size_t i = 0; i < numEvents; ++i) {
-    bool isCreated = (eventFlags[i] & kFSEventStreamEventFlagItemCreated) == kFSEventStreamEventFlagItemCreated;
-    bool isRemoved = (eventFlags[i] & kFSEventStreamEventFlagItemRemoved) == kFSEventStreamEventFlagItemRemoved;
-    bool isModified = (eventFlags[i] & kFSEventStreamEventFlagItemModified) == kFSEventStreamEventFlagItemModified ||
-                      (eventFlags[i] & kFSEventStreamEventFlagItemInodeMetaMod) == kFSEventStreamEventFlagItemInodeMetaMod ||
-                      (eventFlags[i] & kFSEventStreamEventFlagItemFinderInfoMod) == kFSEventStreamEventFlagItemFinderInfoMod ||
-                      (eventFlags[i] & kFSEventStreamEventFlagItemChangeOwner) == kFSEventStreamEventFlagItemChangeOwner ||
-                      (eventFlags[i] & kFSEventStreamEventFlagItemXattrMod) == kFSEventStreamEventFlagItemXattrMod;
-    bool isRenamed = (eventFlags[i] & kFSEventStreamEventFlagItemRenamed) == kFSEventStreamEventFlagItemRenamed;
-    bool isDone = (eventFlags[i] & kFSEventStreamEventFlagHistoryDone) == kFSEventStreamEventFlagHistoryDone;
-    bool isDir = (eventFlags[i] & kFSEventStreamEventFlagItemIsDir) == kFSEventStreamEventFlagItemIsDir;
-
-
-    if (eventFlags[i] & kFSEventStreamEventFlagMustScanSubDirs) {
-      if (eventFlags[i] & kFSEventStreamEventFlagUserDropped) {
-        list.error("Events were dropped by the FSEvents client. File system must be re-scanned.");
-      } else if (eventFlags[i] & kFSEventStreamEventFlagKernelDropped) {
-        list.error("Events were dropped by the kernel. File system must be re-scanned.");
-      } else {
-        list.error("Too many events. File system must be re-scanned.");
-      }
-    }
-
-    if (isDone) {
-      watcher->notify();
-      break;
-    }
-
-    auto ignoredFlags = IGNORED_FLAGS;
-    if (__builtin_available(macOS 10.13, *)) {
-      ignoredFlags |= kFSEventStreamEventFlagItemCloned;
-    }
-
-    // If we don't care about any of the flags that are set, ignore this event.
-    if ((eventFlags[i] & ~ignoredFlags) == 0) {
-      continue;
-    }
-
-    // FSEvents exclusion paths only apply to files, not directories.
-    if (watcher->isIgnored(paths[i])) {
-      continue;
-    }
-
-    // Handle unambiguous events first
-    if (isCreated && !(isRemoved || isModified || isRenamed)) {
-      state->tree->add(paths[i], 0, isDir);
-      list.create(paths[i]);
-    } else if (isRemoved && !(isCreated || isModified || isRenamed)) {
-      state->tree->remove(paths[i]);
-      list.remove(paths[i]);
-      if (paths[i] == watcher->mDir) {
-        deletedRoot = true;
-      }
-    } else if (isModified && !(isCreated || isRemoved || isRenamed)) {
-      struct stat file;
-      if (stat(paths[i], &file)) {
-        continue;
-      }
-
-      // Ignore if mtime is the same as the last event.
-      // This prevents duplicate events from being emitted.
-      // If tv_nsec is zero, the file system probably only has second-level
-      // granularity so allow the even through in that case.
-      uint64_t mtime = CONVERT_TIME(file.st_mtimespec);
-      DirEntry *entry = state->tree->find(paths[i]);
-      if (entry && mtime == entry->mtime && file.st_mtimespec.tv_nsec != 0) {
-        continue;
-      }
-
-      if (entry) {
-        // Update mtime.
-        entry->mtime = mtime;
-      } else {
-        // Add to tree if this path has not been discovered yet.
-        state->tree->add(paths[i], mtime, S_ISDIR(file.st_mode));
-      }
-
-      list.update(paths[i]);
-    } else {
-      // If multiple flags were set, then we need to call `stat` to determine if the file really exists.
-      // This helps disambiguate creates, updates, and deletes.
-      struct stat file;
-      if (stat(paths[i], &file) || !pathExists(paths[i])) {
-        // File does not exist, so we have to assume it was removed. This is not exact since the
-        // flags set by fsevents get coalesced together (e.g. created & deleted), so there is no way to
-        // know whether the create and delete both happened since our snapshot (in which case
-        // we'd rather ignore this event completely). This will result in some extra delete events
-        // being emitted for files we don't know about, but that is the best we can do.
-        state->tree->remove(paths[i]);
-        list.remove(paths[i]);
-        if (paths[i] == watcher->mDir) {
-          deletedRoot = true;
-        }
-        continue;
-      }
-
-      // If the file was modified, and existed before, then this is an update, otherwise a create.
-      uint64_t ctime = CONVERT_TIME(file.st_birthtimespec);
-      uint64_t mtime = CONVERT_TIME(file.st_mtimespec);
-      DirEntry *entry = !since ? state->tree->find(paths[i]) : NULL;
-      if (entry && entry->mtime == mtime && file.st_mtimespec.tv_nsec != 0) {
-        continue;
-      }
-
-      // Some mounted file systems report a creation time of 0/unix epoch which we special case.
-      if (isModified && (entry || (ctime <= since && ctime != 0))) {
-        state->tree->update(paths[i], mtime);
-        list.update(paths[i]);
-      } else {
-        state->tree->add(paths[i], mtime, S_ISDIR(file.st_mode));
-        list.create(paths[i]);
-      }
+  auto *state = static_cast<State *>(stateGuard.get());
+  {
+    std::lock_guard<std::mutex> lock(state->initializationMutex);
+    if (state->initializing) {
+      state->pendingEvents.insert(
+        state->pendingEvents.end(),
+        events.begin(),
+        events.end()
+      );
+      return;
     }
   }
 
-  if (!since) {
-    watcher->notify();
-  }
-
-  // Stop watching if the root directory was deleted.
-  if (deletedRoot) {
-    stopStream((FSEventStreamRef)streamRef, CFRunLoopGetCurrent());
-    watcher->state = nullptr;
-  }
+  processEvents(streamRef, watcher, events);
 }
 
 void checkWatcher(WatcherRef watcher) {
@@ -204,6 +475,10 @@ void checkWatcher(WatcherRef watcher) {
 
 void FSEventsBackend::startStream(WatcherRef watcher, FSEventStreamEventId id) {
   checkWatcher(watcher);
+
+  auto stateGuard = watcher->state;
+  State *state = static_cast<State *>(stateGuard.get());
+  state->tree = std::make_shared<DirTree>(watcher->mDir);
 
   CFAbsoluteTime latency = 0.001;
   CFStringRef fileWatchPath = CFStringCreateWithCString(
@@ -246,6 +521,7 @@ void FSEventsBackend::startStream(WatcherRef watcher, FSEventStreamEventId id) {
   FSEventStreamSetExclusionPaths(stream, exclusions);
 
   FSEventStreamScheduleWithRunLoop(stream, mRunLoop, kCFRunLoopDefaultMode);
+  state->stream = stream;
   bool started = FSEventStreamStart(stream);
 
   CFRelease(pathsToWatch);
@@ -256,10 +532,35 @@ void FSEventsBackend::startStream(WatcherRef watcher, FSEventStreamEventId id) {
     throw WatcherError("Error starting FSEvents stream", watcher);
   }
 
-  auto stateGuard = watcher->state;
-  State* s = static_cast<State*>(stateGuard.get());
-  s->tree = std::make_shared<DirTree>(watcher->mDir);
-  s->stream = stream;
+  IdentityIndex identities = scanIdentityIndex(
+    watcher->mDir,
+    [watcher](const std::string &path) {
+      return watcher->isIgnored(path);
+    },
+    [state](const std::string &path, const IndexedPath &entry) {
+      state->tree->add(path, entry.mtime, entry.isDirectory);
+    }
+  );
+
+  {
+    std::lock_guard<std::mutex> lock(state->initializationMutex);
+    state->identities = std::move(identities);
+  }
+
+  // Events can arrive while the initial identity index is being scanned.
+  // Drain those batches before allowing the callback to process live events.
+  while (watcher->state != nullptr) {
+    std::vector<PendingEvent> pending;
+    {
+      std::lock_guard<std::mutex> lock(state->initializationMutex);
+      if (state->pendingEvents.empty()) {
+        state->initializing = false;
+        break;
+      }
+      pending.swap(state->pendingEvents);
+    }
+    processEvents(stream, watcher, pending);
+  }
 }
 
 void FSEventsBackend::start() {
@@ -284,7 +585,6 @@ FSEventsBackend::~FSEventsBackend() {
 // This function is called by Backend::watch which takes a lock on mMutex
 void FSEventsBackend::subscribe(WatcherRef watcher) {
   auto s = std::make_shared<State>();
-  s->since = 0;
   watcher->state = s;
   startStream(watcher, kFSEventStreamEventIdSinceNow);
 }

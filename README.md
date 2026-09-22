@@ -1,10 +1,12 @@
 # native-watcher
 
 A small Node.js native addon for recursive filesystem subscriptions. It adds
-exact rename correlation when the operating system exposes a reliable pair.
+conservative rename correlation when the native backend has enough evidence.
 
-Linux inotify and Windows `ReadDirectoryChangesW` emit a delete and create event
-with the same opaque `renameId`:
+Linux inotify and Windows `ReadDirectoryChangesW` use operating-system rename
+pairs. macOS uses an in-memory `(device, inode)` identity index built after the
+FSEvents stream starts. A correlated delete and create event have the same
+opaque `renameId`:
 
 ```js
 const watcher = require('native-watcher');
@@ -25,8 +27,11 @@ await subscription.unsubscribe();
 ]
 ```
 
-macOS FSEvents does not provide exact rename pairs, so its events omit
-`renameId`. Events also omit the id when only one side of a move is visible.
+macOS emits `renameId` only when one indexed path disappeared and one new path
+has the same unique identity. It deliberately falls back to ordinary events for
+hard links, target replacement, one-sided moves, and other ambiguous changes.
+If FSEvents requests a rescan, the addon rebuilds the index and reports the
+unambiguous net change; intermediate rename steps may have been coalesced.
 
 Build and test with:
 

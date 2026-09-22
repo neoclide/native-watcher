@@ -17,7 +17,10 @@
       "cflags_cc": ["-std=c++17", "-fexceptions"],
       "conditions": [
         ["OS=='mac'", {
-          "sources": ["src/macos/FSEventsBackend.cc"],
+          "sources": [
+            "src/macos/FSEventsBackend.cc",
+            "src/macos/IdentityIndex.cc"
+          ],
           "link_settings": {
             "libraries": ["CoreServices.framework"]
           },
