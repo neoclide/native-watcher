@@ -287,6 +287,35 @@ test('supports multiple subscriptions for the same directory', async (t) => {
   assert.equal(first.events.slice(afterUnsubscribe).length, 0);
 });
 
+test('keeps duplicate callback subscriptions independent', async () => {
+  const tempRoot = await fs.realpath(os.tmpdir());
+  const directory = await fs.mkdtemp(
+    path.join(tempRoot, 'native-watcher-duplicate-callback-'),
+  );
+  const collector = new EventCollector();
+  const first = await watcher.subscribe(directory, collector.callback);
+  const second = await watcher.subscribe(directory, collector.callback);
+
+  try {
+    const before = path.join(directory, 'before-first-unsubscribe');
+    let observed = collector.waitFor('create', before);
+    await fs.writeFile(before, 'event');
+    await observed;
+
+    await first.unsubscribe();
+
+    const after = path.join(directory, 'second-still-active');
+    const mark = collector.mark();
+    observed = collector.waitFor('create', after, mark);
+    await fs.writeFile(after, 'event');
+    await observed;
+  } finally {
+    await first.unsubscribe();
+    await second.unsubscribe();
+    await fs.rm(directory, {recursive: true, force: true});
+  }
+});
+
 test('removes subscriptions when their Worker environment exits', async () => {
   const fixture = path.join(
     __dirname,

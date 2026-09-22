@@ -54,7 +54,8 @@ exports.createWrapper = (binding) => ({
       options,
       absoluteDirectory,
     );
-    await binding.subscribe(watchedDirectory, callback, nativeOptions);
+    const nativeCallback = (error, events) => callback(error, events);
+    await binding.subscribe(watchedDirectory, nativeCallback, nativeOptions);
 
     let active = true;
     return {
@@ -63,7 +64,7 @@ exports.createWrapper = (binding) => ({
         active = false;
         await binding.unsubscribe(
           watchedDirectory,
-          callback,
+          nativeCallback,
           nativeOptions,
         );
       },
