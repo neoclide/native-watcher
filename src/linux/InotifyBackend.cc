@@ -355,6 +355,11 @@ bool InotifyBackend::handleSubscription(struct inotify_event *event, std::shared
       watcher->mEvents.create(path);
     }
 
+    if (isMoveWithinRoot) {
+      sub->tree->rename(oldPath, path);
+      moveSubscriptions(watcher.get(), oldPath, path);
+    }
+
     struct stat st;
     // Use lstat to avoid resolving symbolic links that we cannot watch anyway
     // https://github.com/parcel-bundler/watcher/issues/76
@@ -363,8 +368,6 @@ bool InotifyBackend::handleSubscription(struct inotify_event *event, std::shared
     }
     DirEntry *entry;
     if (isMoveWithinRoot) {
-      sub->tree->rename(oldPath, path);
-      moveSubscriptions(watcher.get(), oldPath, path);
       entry = sub->tree->update(path, CONVERT_TIME(st.st_mtim));
     } else {
       entry = sub->tree->add(path, CONVERT_TIME(st.st_mtim), S_ISDIR(st.st_mode));

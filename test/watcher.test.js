@@ -202,6 +202,22 @@ test('reports descendant changes below a renamed directory at its new path', asy
   assert.ok(events.every((event) => event.path !== oldChild));
 });
 
+test(
+  'preserves descendant paths across queued Linux directory renames',
+  {skip: process.platform !== 'linux'},
+  async () => {
+    const fixture = path.join(
+      __dirname,
+      'fixtures',
+      'linux-chained-directory-renames.js',
+    );
+    const {stdout} = await execFileAsync(process.execPath, [fixture], {
+      timeout: 15000,
+    });
+    assert.match(stdout, /chained directory renames preserve descendant paths/);
+  },
+);
+
 test('stops watching every descendant of a directory moved out of the root', async () => {
   const tempRoot = await fs.realpath(os.tmpdir());
   const parent = await fs.mkdtemp(path.join(tempRoot, 'native-watcher-move-out-'));
