@@ -68,8 +68,7 @@ std::shared_ptr<Backend> Backend::getShared(std::string backend) {
   return selected;
 }
 
-void removeShared(Backend *backend) {
-  std::unique_lock<std::mutex> lock(getSharedBackendsMutex());
+void removeSharedLocked(Backend *backend) {
   for (auto it = getSharedBackends().begin(); it != getSharedBackends().end(); it++) {
     if (it->second.get() == backend) {
       getSharedBackends().erase(it);
@@ -81,6 +80,11 @@ void removeShared(Backend *backend) {
   if (getSharedBackends().size() == 0) {
     getSharedBackends().rehash(0);
   }
+}
+
+void removeShared(Backend *backend) {
+  std::unique_lock<std::mutex> lock(getSharedBackendsMutex());
+  removeSharedLocked(backend);
 }
 
 void Backend::run() {
@@ -185,8 +189,9 @@ void Backend::invalidate(WatcherRef watcher) {
 }
 
 void Backend::unref() {
+  std::unique_lock<std::mutex> registryLock(getSharedBackendsMutex());
   if (mSubscriptions.size() == 0 && mSharedReservations.load() == 0) {
-    removeShared(this);
+    removeSharedLocked(this);
   }
 }
 
