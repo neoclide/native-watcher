@@ -245,9 +245,8 @@ void InotifyBackend::flushExpiredMoves() {
 
     auto &move = it->second;
     move.watcher->mEvents.remove(move.path);
-    move.tree->remove(move.path);
     if (move.isDirectory) {
-      removeSubscriptions(move.watcher.get(), move.path);
+      removeSubscriptions(move);
     }
     watchers.insert(move.watcher);
     it = mPendingMoves.erase(it);
@@ -258,17 +257,33 @@ void InotifyBackend::flushExpiredMoves() {
 }
 
 void InotifyBackend::moveSubscriptions(
-  Watcher *watcher,
-  const std::string &oldPath,
+  const PendingInotifyMove &move,
   const std::string &newPath
 ) {
-  for (auto &subscription : mSubscriptions) {
-    auto &sub = subscription.second;
-    if (
-      sub->watcher.get() == watcher &&
-      isPathOrDescendant(sub->path, oldPath)
-    ) {
-      sub->path = newPath + sub->path.substr(oldPath.size());
+  for (const auto &subscription : move.subscriptions) {
+    subscription->path = newPath + subscription->path.substr(move.path.size());
+  }
+}
+
+void InotifyBackend::removeSubscriptions(const PendingInotifyMove &move) {
+  std::unordered_set<InotifySubscription *> removed;
+  for (const auto &subscription : move.subscriptions) {
+    removed.insert(subscription.get());
+  }
+
+  std::unordered_set<int> removedDescriptors;
+  for (auto it = mSubscriptions.begin(); it != mSubscriptions.end();) {
+    if (removed.count(it->second.get()) > 0) {
+      removedDescriptors.insert(it->first);
+      it = mSubscriptions.erase(it);
+    } else {
+      ++it;
+    }
+  }
+
+  for (int descriptor : removedDescriptors) {
+    if (mSubscriptions.count(descriptor) == 0) {
+      inotify_rm_watch(mInotify, descriptor);
     }
   }
 }
@@ -338,8 +353,10 @@ bool InotifyBackend::handleSubscription(struct inotify_event *event, std::shared
 
     bool isMoveWithinRoot = pending != pendingMoves.end();
     std::string oldPath;
+    PendingInotifyMove *move = nullptr;
     if (isMoveWithinRoot) {
       oldPath = pending->second.path;
+      move = &pending->second;
       bool targetExisted = sub->tree->find(path) != nullptr;
       if (targetExisted) {
         watcher->mEvents.remove(oldPath);
@@ -351,14 +368,17 @@ bool InotifyBackend::handleSubscription(struct inotify_event *event, std::shared
           "inotify:" + std::to_string(event->cookie)
         );
       }
-      pendingMoves.erase(pending);
     } else {
       watcher->mEvents.create(path);
     }
 
     if (isMoveWithinRoot) {
-      sub->tree->rename(oldPath, path);
-      moveSubscriptions(watcher.get(), oldPath, path);
+      if (sub->tree->find(path) != nullptr) {
+        sub->tree->remove(path);
+      }
+      sub->tree->restore(std::move(move->entries), oldPath, path);
+      moveSubscriptions(*move, path);
+      pendingMoves.erase(pending);
     }
 
     struct stat st;
@@ -400,6 +420,18 @@ bool InotifyBackend::handleSubscription(struct inotify_event *event, std::shared
     }
 
     if ((event->mask & IN_MOVED_FROM) && event->cookie != 0) {
+      std::vector<std::shared_ptr<InotifySubscription>> movedSubscriptions;
+      if (isDir) {
+        for (const auto &subscription : mSubscriptions) {
+          auto &candidate = subscription.second;
+          if (
+            candidate->watcher.get() == watcher.get() &&
+            isPathOrDescendant(candidate->path, path)
+          ) {
+            movedSubscriptions.push_back(candidate);
+          }
+        }
+      }
       pendingMoves.insert_or_assign(
         {watcher.get(), event->cookie},
         PendingInotifyMove {
@@ -407,6 +439,8 @@ bool InotifyBackend::handleSubscription(struct inotify_event *event, std::shared
           sub->tree,
           path,
           isDir,
+          sub->tree->extract(path),
+          std::move(movedSubscriptions),
           std::chrono::steady_clock::now()
         }
       );

@@ -34,6 +34,8 @@ struct PendingInotifyMove {
   std::shared_ptr<DirTree> tree;
   std::string path;
   bool isDirectory;
+  std::vector<DirEntry> entries;
+  std::vector<std::shared_ptr<InotifySubscription>> subscriptions;
   std::chrono::steady_clock::time_point createdAt;
 };
 
@@ -59,7 +61,8 @@ private:
   void closeDescriptors();
   void handleOverflow(std::unordered_set<WatcherRef> &watchers);
   void flushExpiredMoves();
-  void moveSubscriptions(Watcher *watcher, const std::string &oldPath, const std::string &newPath);
+  void moveSubscriptions(const PendingInotifyMove &move, const std::string &newPath);
+  void removeSubscriptions(const PendingInotifyMove &move);
   void removeSubscriptions(Watcher *watcher, const std::string &path);
   void handleEvent(struct inotify_event *event, std::unordered_set<WatcherRef> &watchers, PendingInotifyMoves &pendingMoves);
   bool handleSubscription(struct inotify_event *event, std::shared_ptr<InotifySubscription> sub, PendingInotifyMoves &pendingMoves);

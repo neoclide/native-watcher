@@ -34,7 +34,7 @@ async function runChild(root) {
   });
 }
 
-async function runParent() {
+async function runParent(mode) {
   const parent = await fs.mkdtemp(
     path.join(await fs.realpath(os.tmpdir()), 'native-watcher-chain-'),
   );
@@ -64,13 +64,20 @@ async function runParent() {
       'subscriber to stop',
     );
 
-    await fs.rename(oldRoot, middleRoot);
-    await fs.rename(middleRoot, newRoot);
+    if (mode === 'reuse') {
+      await fs.rename(oldRoot, path.join(parent, 'outside'));
+      await fs.mkdir(path.dirname(oldChild), {recursive: true});
+      await fs.writeFile(oldChild, 'replacement');
+    } else {
+      await fs.rename(oldRoot, middleRoot);
+      await fs.rename(middleRoot, newRoot);
+    }
     child.kill('SIGCONT');
     await delay(200);
 
     const mark = messages.length;
-    await fs.appendFile(newChild, 'after');
+    const expectedChild = mode === 'reuse' ? oldChild : newChild;
+    await fs.appendFile(expectedChild, 'after');
     await fs.writeFile(marker, 'marker');
     await waitFor(
       () => messages.slice(mark).some((message) =>
@@ -83,13 +90,17 @@ async function runParent() {
       .slice(mark)
       .flatMap((message) => message.events ?? []);
     assert.ok(
-      events.some((event) => event.type === 'update' && event.path === newChild),
-      `missing update for ${newChild}: ${JSON.stringify(events)}`,
+      events.some(
+        (event) => event.type === 'update' && event.path === expectedChild,
+      ),
+      `missing update for ${expectedChild}: ${JSON.stringify(events)}`,
     );
-    assert.ok(
-      events.every((event) => event.path !== oldChild),
-      `received stale path ${oldChild}: ${JSON.stringify(events)}`,
-    );
+    if (mode !== 'reuse') {
+      assert.ok(
+        events.every((event) => event.path !== oldChild),
+        `received stale path ${oldChild}: ${JSON.stringify(events)}`,
+      );
+    }
     assert.ok(
       messages.every((message) => !message.error),
       `watcher error: ${JSON.stringify(messages)}`,
@@ -111,8 +122,13 @@ if (process.argv[2] === 'child') {
     process.exitCode = 1;
   });
 } else {
-  runParent().then(
-    () => console.log('chained directory renames preserve descendant paths'),
+  const mode = process.argv[2] ?? 'chain';
+  runParent(mode).then(
+    () => console.log(
+      mode === 'reuse'
+        ? 'reused directory path remains watched'
+        : 'chained directory renames preserve descendant paths',
+    ),
     (error) => {
       console.error(error);
       process.exitCode = 1;

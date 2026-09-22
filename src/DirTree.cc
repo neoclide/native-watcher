@@ -90,6 +90,35 @@ DirEntry *DirTree::update(std::string path, uint64_t mtime) {
   return found;
 }
 
+std::vector<DirEntry> DirTree::extract(std::string path) {
+  std::lock_guard<std::mutex> lock(mDirCacheMutex());
+  std::string pathStart = path + DIR_SEP;
+  std::vector<DirEntry> extracted;
+
+  for (auto it = entries.begin(); it != entries.end();) {
+    if (it->first == path || it->first.rfind(pathStart, 0) == 0) {
+      extracted.push_back(it->second);
+      it = entries.erase(it);
+    } else {
+      ++it;
+    }
+  }
+
+  return extracted;
+}
+
+void DirTree::restore(
+  std::vector<DirEntry> restored,
+  std::string oldPath,
+  std::string newPath
+) {
+  std::lock_guard<std::mutex> lock(mDirCacheMutex());
+  for (auto &entry : restored) {
+    entry.path = newPath + entry.path.substr(oldPath.size());
+    entries.insert_or_assign(entry.path, entry);
+  }
+}
+
 void DirTree::rename(std::string oldPath, std::string newPath) {
   std::lock_guard<std::mutex> lock(mDirCacheMutex());
   std::string pathStart = oldPath + DIR_SEP;

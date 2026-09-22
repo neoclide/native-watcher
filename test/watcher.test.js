@@ -218,6 +218,22 @@ test(
   },
 );
 
+test(
+  'keeps a reused Linux directory path watched after move expiry',
+  {skip: process.platform !== 'linux'},
+  async () => {
+    const fixture = path.join(
+      __dirname,
+      'fixtures',
+      'linux-chained-directory-renames.js',
+    );
+    const {stdout} = await execFileAsync(process.execPath, [fixture, 'reuse'], {
+      timeout: 15000,
+    });
+    assert.match(stdout, /reused directory path remains watched/);
+  },
+);
+
 test('stops watching every descendant of a directory moved out of the root', async () => {
   const tempRoot = await fs.realpath(os.tmpdir());
   const parent = await fs.mkdtemp(path.join(tempRoot, 'native-watcher-move-out-'));
