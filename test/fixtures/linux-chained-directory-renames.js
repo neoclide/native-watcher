@@ -43,12 +43,17 @@ async function runParent(mode) {
   const middleRoot = path.join(root, 'middle');
   const newRoot = path.join(root, 'new');
   const oldChild = path.join(oldRoot, 'nested', 'existing');
+  const middleChild = path.join(middleRoot, 'nested', 'existing');
   const newChild = path.join(newRoot, 'nested', 'existing');
   const marker = path.join(root, 'delivery-marker');
   await fs.mkdir(path.dirname(oldChild), {recursive: true});
   await fs.writeFile(oldChild, 'before');
 
-  const options = mode === 'ignore' ? {ignore: ['old/nested']} : {};
+  const options = mode === 'ignore'
+    ? {ignore: ['old/nested']}
+    : mode === 'ignore-replace'
+      ? {ignore: ['middle/nested']}
+      : {};
   const child = fork(__filename, ['child', root, JSON.stringify(options)], {
     stdio: ['ignore', 'inherit', 'inherit', 'ipc'],
   });
@@ -70,6 +75,12 @@ async function runParent(mode) {
       await fs.rename(oldRoot, path.join(parent, 'outside'));
       await fs.mkdir(path.dirname(oldChild), {recursive: true});
       await fs.writeFile(oldChild, 'replacement');
+    } else if (mode === 'ignore-replace') {
+      await fs.rename(oldRoot, middleRoot);
+      await fs.rm(path.dirname(middleChild), {recursive: true});
+      await fs.mkdir(path.dirname(middleChild), {recursive: true});
+      await fs.writeFile(middleChild, 'replacement');
+      await fs.rename(middleRoot, newRoot);
     } else if (mode === 'chain') {
       await fs.rename(oldRoot, middleRoot);
       await fs.rename(middleRoot, newRoot);
@@ -148,7 +159,9 @@ if (process.argv[2] === 'child') {
     () => console.log(
       mode === 'reuse'
         ? 'reused directory path remains watched'
-        : mode === 'ignore'
+        : mode === 'ignore-replace'
+          ? 'replaced directory installs newly visible watches'
+          : mode === 'ignore'
           ? 'renamed directory installs newly visible watches'
           : 'chained directory renames preserve descendant paths',
     ),

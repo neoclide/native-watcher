@@ -250,6 +250,24 @@ test(
   },
 );
 
+test(
+  'rewatches a replaced Linux subtree after it becomes visible again',
+  {skip: process.platform !== 'linux'},
+  async () => {
+    const fixture = path.join(
+      __dirname,
+      'fixtures',
+      'linux-chained-directory-renames.js',
+    );
+    const {stdout} = await execFileAsync(
+      process.execPath,
+      [fixture, 'ignore-replace'],
+      {timeout: 15000},
+    );
+    assert.match(stdout, /replaced directory installs newly visible watches/);
+  },
+);
+
 test('stops watching every descendant of a directory moved out of the root', async () => {
   const tempRoot = await fs.realpath(os.tmpdir());
   const parent = await fs.mkdtemp(path.join(tempRoot, 'native-watcher-move-out-'));

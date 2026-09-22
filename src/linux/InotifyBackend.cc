@@ -124,6 +124,31 @@ bool InotifyBackend::watchDir(WatcherRef watcher, std::string path, std::shared_
     return false;
   }
 
+  bool alreadyTracked = false;
+  std::unordered_set<int> staleDescriptors;
+  for (auto it = mSubscriptions.begin(); it != mSubscriptions.end();) {
+    if (
+      it->second->watcher.get() == watcher.get() &&
+      it->second->path == path
+    ) {
+      if (it->first == wd) {
+        alreadyTracked = true;
+        ++it;
+      } else {
+        staleDescriptors.insert(it->first);
+        it = mSubscriptions.erase(it);
+      }
+    } else {
+      ++it;
+    }
+  }
+  for (int descriptor : staleDescriptors) {
+    if (mSubscriptions.count(descriptor) == 0) {
+      inotify_rm_watch(mInotify, descriptor);
+    }
+  }
+  if (alreadyTracked) return true;
+
   std::shared_ptr<InotifySubscription> sub = std::make_shared<InotifySubscription>();
   sub->tree = tree;
   sub->path = path;
@@ -159,7 +184,7 @@ bool InotifyBackend::addCreatedTree(
     }
 
     if (isDirectory &&
-        ((!existed && !watchDir(watcher, candidate, tree)) ||
+        (!watchDir(watcher, candidate, tree) ||
          !addCreatedTree(watcher, candidate, tree))) {
       closedir(directory);
       return false;
