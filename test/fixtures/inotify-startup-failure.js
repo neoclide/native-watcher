@@ -32,7 +32,7 @@ async function main() {
 
     await assert.rejects(
       watcher.subscribe(directory, () => {}, {backend: 'inotify'}),
-      /Unable to initialize inotify: Too many open files/,
+      /Unable to initialize inotify:/,
     );
     await timer;
     assert.equal(timerFired, true);

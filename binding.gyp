@@ -38,7 +38,8 @@
           ],
           "ldflags": [
             "-static-libstdc++",
-            "-Wl,-Bsymbolic-functions"
+            "-Wl,-Bsymbolic",
+            "-Wl,--exclude-libs,ALL"
           ],
           "defines": ["INOTIFY"]
         }],
