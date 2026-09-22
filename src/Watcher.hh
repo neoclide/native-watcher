@@ -14,12 +14,15 @@
 using namespace Napi;
 
 struct Watcher;
+class Backend;
 using WatcherRef = std::shared_ptr<Watcher>;
 
 struct Callback {
   Napi::ThreadSafeFunction tsfn;
   Napi::FunctionReference ref;
+  napi_env env;
   std::thread::id threadId;
+  bool closing;
 };
 
 class WatcherState {
@@ -46,16 +49,21 @@ struct Watcher {
   void notifyError(std::exception &err);
   bool watch(Function callback);
   bool unwatch(Function callback);
+  bool hasCallbacksForEnvironment(napi_env env);
+  void addBackend(std::shared_ptr<Backend> backend);
+  void removeBackend(Backend *backend);
   void unref();
   bool isIgnored(std::string path);
   void destroy();
 
   static WatcherRef getShared(std::string dir, std::unordered_set<std::string> ignorePaths, std::unordered_set<Glob> ignoreGlobs);
+  static void cleanupEnvironment(napi_env env);
 
 private:
   std::mutex mMutex;
   std::condition_variable mCond;
   std::vector<Callback> mCallbacks;
+  std::vector<std::weak_ptr<Backend>> mBackends;
   std::shared_ptr<Debounce> mDebounce;
 
   std::vector<Callback>::iterator findCallback(Function callback);

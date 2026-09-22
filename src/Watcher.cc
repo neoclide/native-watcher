@@ -1,4 +1,5 @@
 #include "Watcher.hh"
+#include "Backend.hh"
 #include <unordered_set>
 
 using namespace Napi;
@@ -21,8 +22,14 @@ static std::unordered_set<WatcherRef , WatcherHash, WatcherCompare>& getSharedWa
   return *sharedWatchers;
 }
 
+static std::mutex& getSharedWatchersMutex() {
+  static std::mutex* mutex = new std::mutex();
+  return *mutex;
+}
+
 WatcherRef Watcher::getShared(std::string dir, std::unordered_set<std::string> ignorePaths, std::unordered_set<Glob> ignoreGlobs) {
   WatcherRef watcher = std::make_shared<Watcher>(dir, ignorePaths, ignoreGlobs);
+  std::unique_lock<std::mutex> lock(getSharedWatchersMutex());
   auto found = getSharedWatchers().find(watcher);
   if (found != getSharedWatchers().end()) {
     return *found;
@@ -33,6 +40,7 @@ WatcherRef Watcher::getShared(std::string dir, std::unordered_set<std::string> i
 }
 
 void removeShared(Watcher *watcher) {
+  std::unique_lock<std::mutex> lock(getSharedWatchersMutex());
   for (auto it = getSharedWatchers().begin(); it != getSharedWatchers().end(); it++) {
     if (it->get() == watcher) {
       getSharedWatchers().erase(it);
@@ -43,6 +51,49 @@ void removeShared(Watcher *watcher) {
   // Free up memory.
   if (getSharedWatchers().size() == 0) {
     getSharedWatchers().rehash(0);
+  }
+}
+
+void Watcher::cleanupEnvironment(napi_env env) {
+  std::vector<WatcherRef> watchers;
+  {
+    std::unique_lock<std::mutex> registryLock(getSharedWatchersMutex());
+    watchers.assign(getSharedWatchers().begin(), getSharedWatchers().end());
+  }
+
+  for (auto &watcher : watchers) {
+    std::vector<std::shared_ptr<Backend>> backends;
+    bool removedCallback = false;
+    bool becameEmpty = false;
+    {
+      std::unique_lock<std::mutex> lock(watcher->mMutex);
+      for (auto it = watcher->mCallbacks.begin(); it != watcher->mCallbacks.end();) {
+        if (it->env == env) {
+          it->tsfn.Abort();
+          it->ref.Unref();
+          it = watcher->mCallbacks.erase(it);
+          removedCallback = true;
+        } else {
+          ++it;
+        }
+      }
+
+      becameEmpty = removedCallback && watcher->mCallbacks.empty();
+      if (becameEmpty) {
+        for (auto &weakBackend : watcher->mBackends) {
+          if (auto backend = weakBackend.lock()) {
+            backends.push_back(backend);
+          }
+        }
+      }
+    }
+
+    if (becameEmpty) {
+      watcher->unref();
+      for (auto &backend : backends) {
+        backend->unwatch(watcher);
+      }
+    }
   }
 }
 
@@ -129,7 +180,18 @@ void Watcher::triggerCallbacks() {
     mEvents.clear();
 
     for (auto it = mCallbacks.begin(); it != mCallbacks.end(); it++) {
-      it->tsfn.BlockingCall(new CallbackData(error, events), callJSFunction);
+      if (it->closing) {
+        continue;
+      }
+
+      auto data = new CallbackData(error, events);
+      napi_status status = it->tsfn.BlockingCall(data, callJSFunction);
+      if (status != napi_ok) {
+        delete data;
+        if (status == napi_closing) {
+          it->closing = true;
+        }
+      }
     }
   }
 }
@@ -154,10 +216,44 @@ bool Watcher::watch(Function callback) {
   mCallbacks.push_back(Callback {
     tsfn,
     Napi::Persistent(callback),
-    std::this_thread::get_id()
+    callback.Env(),
+    std::this_thread::get_id(),
+    false
   });
 
   return true;
+}
+
+bool Watcher::hasCallbacksForEnvironment(napi_env env) {
+  std::unique_lock<std::mutex> lock(mMutex);
+  for (auto &callback : mCallbacks) {
+    if (callback.env == env) {
+      return true;
+    }
+  }
+  return false;
+}
+
+void Watcher::addBackend(std::shared_ptr<Backend> backend) {
+  std::unique_lock<std::mutex> lock(mMutex);
+  for (auto &weakBackend : mBackends) {
+    if (auto existing = weakBackend.lock(); existing.get() == backend.get()) {
+      return;
+    }
+  }
+  mBackends.push_back(backend);
+}
+
+void Watcher::removeBackend(Backend *backend) {
+  std::unique_lock<std::mutex> lock(mMutex);
+  for (auto it = mBackends.begin(); it != mBackends.end();) {
+    auto existing = it->lock();
+    if (!existing || existing.get() == backend) {
+      it = mBackends.erase(it);
+    } else {
+      ++it;
+    }
+  }
 }
 
 // This should be called from the JavaScript thread.

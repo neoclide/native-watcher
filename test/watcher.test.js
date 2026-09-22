@@ -4,7 +4,9 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs/promises');
 const os = require('node:os');
 const path = require('node:path');
+const {execFile} = require('node:child_process');
 const test = require('node:test');
+const {promisify} = require('node:util');
 const watcher = require('..');
 const {
   EventCollector,
@@ -14,6 +16,7 @@ const {
 } = require('./helpers');
 
 const settle = () => new Promise((resolve) => setTimeout(resolve, 150));
+const execFileAsync = promisify(execFile);
 
 test('reports create, update, and delete for a file', async (t) => {
   const {directory, collector} = await createFixture(t);
@@ -211,6 +214,18 @@ test('supports multiple subscriptions for the same directory', async (t) => {
   await stillWaiting;
   await settle();
   assert.equal(first.events.slice(afterUnsubscribe).length, 0);
+});
+
+test('removes subscriptions when their Worker environment exits', async () => {
+  const fixture = path.join(
+    __dirname,
+    'fixtures',
+    'worker-environment-cleanup.js',
+  );
+  const {stdout} = await execFileAsync(process.execPath, [fixture], {
+    timeout: 15000,
+  });
+  assert.match(stdout, /worker cleanup ok/);
 });
 
 test('keeps different ignore options separate for the same directory', async (t) => {

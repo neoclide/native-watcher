@@ -65,6 +65,7 @@ std::shared_ptr<Backend> getBackend(Env env, Value opts) {
 class SubscribeRunner : public PromiseRunner {
 public:
   SubscribeRunner(Env env, Value dir, Value fn, Value opts) : PromiseRunner(env) {
+    callbackEnv = env;
     watcher = Watcher::getShared(
       std::string(dir.As<String>().Utf8Value().c_str()),
       getIgnorePaths(env, opts),
@@ -79,10 +80,15 @@ private:
   WatcherRef watcher;
   std::shared_ptr<Backend> backend;
   FunctionReference callback;
+  napi_env callbackEnv;
 
   void execute() override {
     try {
       backend->watch(watcher);
+      watcher->addBackend(backend);
+      if (!watcher->hasCallbacksForEnvironment(callbackEnv)) {
+        backend->unwatch(watcher);
+      }
     } catch (std::exception&) {
       watcher->destroy();
       throw;
@@ -145,7 +151,18 @@ Value unsubscribe(const CallbackInfo& info) {
   return queueSubscriptionWork<UnsubscribeRunner>(info);
 }
 
+void cleanupEnvironment(void *data) {
+  Watcher::cleanupEnvironment(static_cast<napi_env>(data));
+}
+
 Object Init(Env env, Object exports) {
+  napi_status status = napi_add_env_cleanup_hook(env, cleanupEnvironment, env);
+  if (status != napi_ok) {
+    Error::New(env, "Unable to register environment cleanup hook")
+      .ThrowAsJavaScriptException();
+    return exports;
+  }
+
   exports.Set(
     String::New(env, "subscribe"),
     Function::New(env, subscribe)

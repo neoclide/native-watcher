@@ -120,6 +120,7 @@ void Backend::unwatch(WatcherRef watcher) {
   size_t deleted = mSubscriptions.erase(watcher);
   if (deleted > 0) {
     this->unsubscribe(watcher);
+    watcher->removeBackend(this);
     unref();
   }
 }
