@@ -2,6 +2,7 @@
 #include <stack>
 #include <cwchar>
 #include <atomic>
+#include <cstddef>
 #include "../DirTree.hh"
 #include "../shared/BruteForceBackend.hh"
 #include "./WindowsBackend.hh"
@@ -179,7 +180,7 @@ public:
         auto keepAlive = subscription->shared_from_this();
         subscription->mPollPending = false;
         try {
-          subscription->processEvents(errorCode);
+          subscription->processEvents(errorCode, numBytes);
         } catch (WatcherError &err) {
           subscription->mBackend->handleWatcherError(err);
         }
@@ -192,7 +193,7 @@ public:
     mPollPending = true;
   }
 
-  void processEvents(DWORD errorCode) {
+  void processEvents(DWORD errorCode, DWORD numBytes) {
     if (mStopRequested) {
       finishStop();
       return;
@@ -208,7 +209,8 @@ public:
         poll();
         return;
       case ERROR_NOTIFY_ENUM_DIR:
-        throw WatcherError("Buffer overflow. Some events may have been lost.", mWatcher);
+        failOverflow();
+        return;
       case ERROR_ACCESS_DENIED: {
         // This can happen if the watched directory is deleted. Check if that is the case,
         // and if so emit a delete event. Otherwise, fall through to default error case.
@@ -228,18 +230,51 @@ public:
         }
     }
 
+    if (numBytes == 0) {
+      failOverflow();
+      return;
+    }
+    if (numBytes > mWriteBuffer.size()) {
+      failOverflow();
+      return;
+    }
+
     // Swap read and write buffers, and poll again
     std::swap(mWriteBuffer, mReadBuffer);
     poll();
 
     // Read change events
     BYTE *base = mReadBuffer.data();
-    while (true) {
+    BYTE *end = base + numBytes;
+    while (base < end) {
+      size_t remaining = static_cast<size_t>(end - base);
+      if (remaining < offsetof(FILE_NOTIFY_INFORMATION, FileName)) {
+        failOverflow();
+        return;
+      }
+
       PFILE_NOTIFY_INFORMATION info = (PFILE_NOTIFY_INFORMATION)base;
+      size_t recordSize = offsetof(FILE_NOTIFY_INFORMATION, FileName) +
+        info->FileNameLength;
+      if (
+        info->FileNameLength % sizeof(WCHAR) != 0 ||
+        recordSize > remaining
+      ) {
+        failOverflow();
+        return;
+      }
       processEvent(info);
 
       if (info->NextEntryOffset == 0) {
         break;
+      }
+
+      if (
+        info->NextEntryOffset < recordSize ||
+        info->NextEntryOffset >= remaining
+      ) {
+        failOverflow();
+        return;
       }
 
       base += info->NextEntryOffset;
@@ -356,6 +391,15 @@ public:
   }
 
 private:
+  void failOverflow() {
+    mWatcher->mEvents.error(
+      "ReadDirectoryChangesW buffer overflow. The subscription can no "
+      "longer guarantee complete filesystem events."
+    );
+    requestStop();
+    mWatcher->notify();
+  }
+
   void beginStop() {
     mRunning = false;
     if (mPollPending) {

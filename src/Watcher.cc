@@ -120,7 +120,7 @@ void Watcher::notify() {
   std::unique_lock<std::mutex> lk(mMutex);
   mCond.notify_all();
 
-  if (mCallbacks.size() > 0 && mEvents.size() > 0) {
+  if (mCallbacks.size() > 0 && (mEvents.size() > 0 || mEvents.hasError())) {
     // We must release our lock before calling into the debouncer
     // to avoid a deadlock: the debouncer thread itself will require
     // our lock from its thread when calling into `triggerCallbacks`

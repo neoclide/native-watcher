@@ -168,7 +168,7 @@ void InotifyBackend::handleEvents() {
       event = (struct inotify_event *)ptr;
 
       if ((event->mask & IN_Q_OVERFLOW) == IN_Q_OVERFLOW) {
-        // overflow
+        handleOverflow(watchers);
         continue;
       }
 
@@ -178,6 +178,30 @@ void InotifyBackend::handleEvents() {
 
   for (auto it = watchers.begin(); it != watchers.end(); it++) {
     (*it)->notify();
+  }
+}
+
+void InotifyBackend::handleOverflow(std::unordered_set<WatcherRef> &watchers) {
+  std::unique_lock<std::mutex> lock(mMutex);
+  std::unordered_set<WatcherRef> overflowed;
+  for (const auto &subscription : mSubscriptions) {
+    overflowed.insert(subscription.second->watcher);
+  }
+
+  for (const auto &watcher : overflowed) {
+    watcher->mEvents.error(
+      "inotify queue overflow. The subscription can no longer guarantee "
+      "complete filesystem events."
+    );
+    removeSubscriptions(watcher.get(), watcher->mDir);
+    for (auto it = mPendingMoves.begin(); it != mPendingMoves.end();) {
+      if (it->second.watcher.get() == watcher.get()) {
+        it = mPendingMoves.erase(it);
+      } else {
+        ++it;
+      }
+    }
+    watchers.insert(watcher);
   }
 }
 

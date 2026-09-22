@@ -55,6 +55,7 @@ private:
   bool watchDir(WatcherRef watcher, std::string path, std::shared_ptr<DirTree> tree);
   bool addCreatedTree(WatcherRef watcher, const std::string &path, std::shared_ptr<DirTree> tree);
   void handleEvents();
+  void handleOverflow(std::unordered_set<WatcherRef> &watchers);
   void flushExpiredMoves();
   void moveSubscriptions(Watcher *watcher, const std::string &oldPath, const std::string &newPath);
   void removeSubscriptions(Watcher *watcher, const std::string &path);
