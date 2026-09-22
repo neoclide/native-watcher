@@ -1,6 +1,7 @@
 #include <CoreServices/CoreServices.h>
 #include <sys/stat.h>
 #include <algorithm>
+#include <atomic>
 #include <mutex>
 #include <string>
 #include <unordered_map>
@@ -22,6 +23,30 @@ void stopStream(FSEventStreamRef stream, CFRunLoopRef runLoop) {
   FSEventStreamRelease(stream);
 }
 
+struct WatcherContext {
+  std::atomic<size_t> references {1};
+  WatcherRef watcher;
+
+  explicit WatcherContext(WatcherRef watcher) : watcher(watcher) {}
+};
+
+const void *retainWatcherContext(const void *info) {
+  auto *context = const_cast<WatcherContext *>(
+    static_cast<const WatcherContext *>(info)
+  );
+  context->references.fetch_add(1);
+  return info;
+}
+
+void releaseWatcherContext(const void *info) {
+  auto *context = const_cast<WatcherContext *>(
+    static_cast<const WatcherContext *>(info)
+  );
+  if (context->references.fetch_sub(1) == 1) {
+    delete context;
+  }
+}
+
 struct PendingEvent {
   std::string path;
   FSEventStreamEventFlags flags;
@@ -30,7 +55,7 @@ struct PendingEvent {
 
 class State: public WatcherState {
 public:
-  FSEventStreamRef stream;
+  FSEventStreamRef stream = nullptr;
   std::shared_ptr<DirTree> tree;
   IdentityIndex identities;
   std::mutex initializationMutex;
@@ -483,7 +508,8 @@ void FSEventsCallback(
   const FSEventStreamEventId eventIds[]
 ) {
   char **paths = (char **)eventPaths;
-  std::shared_ptr<Watcher>& watcher = *static_cast<std::shared_ptr<Watcher> *>(clientCallBackInfo);
+  auto *context = static_cast<WatcherContext *>(clientCallBackInfo);
+  WatcherRef &watcher = context->watcher;
   if (watcher->state == nullptr) return;
 
   std::vector<PendingEvent> events;
@@ -541,9 +567,15 @@ void FSEventsBackend::startStream(WatcherRef watcher, FSEventStreamEventId id) {
     NULL
   );
 
-  // Make a watcher reference we can pass into the callback. This ensures bumped ref-count.
-  std::shared_ptr<Watcher>* callbackWatcher = new std::shared_ptr<Watcher> (watcher);
-  FSEventStreamContext callbackInfo {0, static_cast<void*> (callbackWatcher), nullptr, nullptr, nullptr};
+  // FSEvents retains this context and releases it with the stream.
+  auto *callbackWatcher = new WatcherContext(watcher);
+  FSEventStreamContext callbackInfo {
+    0,
+    callbackWatcher,
+    retainWatcherContext,
+    releaseWatcherContext,
+    nullptr
+  };
   FSEventStreamRef stream = FSEventStreamCreate(
     NULL,
     &FSEventsCallback,
@@ -553,8 +585,18 @@ void FSEventsBackend::startStream(WatcherRef watcher, FSEventStreamEventId id) {
     latency,
     kFSEventStreamCreateFlagFileEvents
   );
+  releaseWatcherContext(callbackWatcher);
+  if (stream == nullptr) {
+    CFRelease(pathsToWatch);
+    CFRelease(fileWatchPath);
+    throw WatcherError("Error creating FSEvents stream", watcher);
+  }
 
-  CFMutableArrayRef exclusions = CFArrayCreateMutable(NULL, watcher->mIgnorePaths.size(), NULL);
+  CFMutableArrayRef exclusions = CFArrayCreateMutable(
+    NULL,
+    watcher->mIgnorePaths.size(),
+    &kCFTypeArrayCallBacks
+  );
   for (auto it = watcher->mIgnorePaths.begin(); it != watcher->mIgnorePaths.end(); it++) {
     CFStringRef path = CFStringCreateWithCString(
       NULL,
@@ -563,9 +605,11 @@ void FSEventsBackend::startStream(WatcherRef watcher, FSEventStreamEventId id) {
     );
 
     CFArrayAppendValue(exclusions, (const void *)path);
+    CFRelease(path);
   }
 
   FSEventStreamSetExclusionPaths(stream, exclusions);
+  CFRelease(exclusions);
 
   FSEventStreamScheduleWithRunLoop(stream, mRunLoop, kCFRunLoopDefaultMode);
   state->stream = stream;
@@ -575,7 +619,14 @@ void FSEventsBackend::startStream(WatcherRef watcher, FSEventStreamEventId id) {
   CFRelease(fileWatchPath);
 
   if (!started) {
+    FSEventStreamUnscheduleFromRunLoop(
+      stream,
+      mRunLoop,
+      kCFRunLoopDefaultMode
+    );
+    FSEventStreamInvalidate(stream);
     FSEventStreamRelease(stream);
+    state->stream = nullptr;
     throw WatcherError("Error starting FSEvents stream", watcher);
   }
 
@@ -633,7 +684,16 @@ FSEventsBackend::~FSEventsBackend() {
 void FSEventsBackend::subscribe(WatcherRef watcher) {
   auto s = std::make_shared<State>();
   watcher->state = s;
-  startStream(watcher, kFSEventStreamEventIdSinceNow);
+  try {
+    startStream(watcher, kFSEventStreamEventIdSinceNow);
+  } catch (...) {
+    if (s->stream != nullptr) {
+      stopStream(s->stream, mRunLoop);
+      s->stream = nullptr;
+    }
+    watcher->state = nullptr;
+    throw;
+  }
 }
 
 // This function is called by Backend::unwatch which takes a lock on mMutex

@@ -482,6 +482,41 @@ test(
   },
 );
 
+test(
+  'releases macOS stream resources across repeated subscriptions',
+  {skip: process.platform !== 'darwin'},
+  async () => {
+    const tempRoot = await fs.realpath(os.tmpdir());
+    const directory = await fs.mkdtemp(
+      path.join(tempRoot, 'native-watcher-stream-lifecycle-'),
+    );
+    try {
+      for (let index = 0; index < 25; index++) {
+        const subscription = await watcher.subscribe(directory, () => {}, {
+          ignore: [`ignored-${index}`],
+        });
+        await subscription.unsubscribe();
+      }
+
+      const collector = new EventCollector();
+      const subscription = await watcher.subscribe(
+        directory,
+        collector.callback,
+      );
+      try {
+        const file = path.join(directory, 'after-repeated-subscriptions');
+        const observed = collector.waitFor('create', file);
+        await fs.writeFile(file, 'event');
+        await observed;
+      } finally {
+        await subscription.unsubscribe();
+      }
+    } finally {
+      await fs.rm(directory, {recursive: true, force: true});
+    }
+  },
+);
+
 test('keeps different ignore options separate for the same directory', async (t) => {
   let firstExisting;
   let secondExisting;
