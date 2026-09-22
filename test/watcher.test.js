@@ -168,6 +168,76 @@ test('indexes and reports a populated directory moved into the root', async (t) 
   assertEvent(events, 'create', newChild);
 });
 
+test('reports descendant changes below a renamed directory at its new path', async (t) => {
+  let oldDirectory;
+  let oldChild;
+  const {directory, collector} = await createFixture(
+    t,
+    undefined,
+    async (root) => {
+      oldDirectory = path.join(root, 'old', 'nested');
+      oldChild = path.join(oldDirectory, 'existing');
+      await fs.mkdir(oldDirectory, {recursive: true});
+      await fs.writeFile(oldChild, 'before');
+    },
+  );
+  const newRoot = path.join(directory, 'new');
+  const newChild = path.join(newRoot, 'nested', 'existing');
+
+  let mark = collector.mark();
+  let observed = collector.waitFrom(mark, (events) =>
+    events.some((event) => event.path === newRoot),
+  );
+  await fs.rename(path.join(directory, 'old'), newRoot);
+  await observed;
+
+  mark = collector.mark();
+  observed = collector.waitFrom(mark, (events) =>
+    events.some((event) => event.path === oldChild || event.path === newChild),
+  );
+  await fs.appendFile(newChild, 'after');
+  await fs.writeFile(path.join(directory, 'delivery-marker'), 'marker');
+  const events = await observed;
+  assertEvent(events, 'update', newChild);
+  assert.ok(events.every((event) => event.path !== oldChild));
+});
+
+test('stops watching every descendant of a directory moved out of the root', async () => {
+  const tempRoot = await fs.realpath(os.tmpdir());
+  const parent = await fs.mkdtemp(path.join(tempRoot, 'native-watcher-move-out-'));
+  const directory = path.join(parent, 'watched');
+  const oldRoot = path.join(directory, 'old');
+  const oldChild = path.join(oldRoot, 'nested', 'existing');
+  const outsideRoot = path.join(parent, 'outside');
+  const outsideChild = path.join(outsideRoot, 'nested', 'existing');
+  await fs.mkdir(path.dirname(oldChild), {recursive: true});
+  await fs.writeFile(oldChild, 'before');
+  const collector = new EventCollector();
+  const subscription = await watcher.subscribe(directory, collector.callback);
+
+  try {
+    let mark = collector.mark();
+    let observed = collector.waitFor('delete', oldRoot, mark);
+    await fs.rename(oldRoot, outsideRoot);
+    await observed;
+
+    mark = collector.mark();
+    const marker = path.join(directory, 'delivery-marker');
+    observed = collector.waitFor('create', marker, mark);
+    await fs.appendFile(outsideChild, 'after');
+    await fs.writeFile(marker, 'marker');
+    await observed;
+    await settle();
+
+    const events = collector.events.slice(mark);
+    assert.ok(events.every((event) => event.path !== oldChild));
+    assert.ok(events.every((event) => event.path !== outsideChild));
+  } finally {
+    await subscription.unsubscribe();
+    await fs.rm(parent, {recursive: true, force: true});
+  }
+});
+
 test('reports symlink creation and deletion without following its target', async (t) => {
   const {directory, collector} = await createFixture(t);
   const target = path.join(directory, 'target.txt');

@@ -34,6 +34,7 @@ public:
   DirEntry *add(std::string path, uint64_t mtime, bool isDir);
   DirEntry *find(std::string path);
   DirEntry *update(std::string path, uint64_t mtime);
+  void rename(std::string oldPath, std::string newPath);
   void remove(std::string path);
   void write(FILE *f);
   void getChanges(DirTree *snapshot, EventList &events);

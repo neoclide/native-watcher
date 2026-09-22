@@ -31,7 +31,9 @@ struct InotifyMoveKeyHash {
 
 struct PendingInotifyMove {
   WatcherRef watcher;
+  std::shared_ptr<DirTree> tree;
   std::string path;
+  bool isDirectory;
   std::chrono::steady_clock::time_point createdAt;
 };
 
@@ -54,6 +56,8 @@ private:
   bool addCreatedTree(WatcherRef watcher, const std::string &path, std::shared_ptr<DirTree> tree);
   void handleEvents();
   void flushExpiredMoves();
+  void moveSubscriptions(Watcher *watcher, const std::string &oldPath, const std::string &newPath);
+  void removeSubscriptions(Watcher *watcher, const std::string &path);
   void handleEvent(struct inotify_event *event, std::unordered_set<WatcherRef> &watchers, PendingInotifyMoves &pendingMoves);
   bool handleSubscription(struct inotify_event *event, std::shared_ptr<InotifySubscription> sub, PendingInotifyMoves &pendingMoves);
 };
