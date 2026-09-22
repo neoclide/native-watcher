@@ -362,6 +362,54 @@ test(
 );
 
 test(
+  'preserves Windows descendant indexes across queued directory renames',
+  {skip: process.platform !== 'win32'},
+  async (t) => {
+    const tempDirectory = await fs.realpath(os.tmpdir());
+    const directory = await fs.mkdtemp(path.join(tempDirectory, 'native-watcher-'));
+    const oldRoot = path.join(directory, 'old');
+    const middleRoot = path.join(directory, 'middle');
+    const newRoot = path.join(directory, 'new');
+    const target = path.join(newRoot, 'nested', 'target.txt');
+    const source = path.join(newRoot, 'nested', 'source.txt');
+    const marker = path.join(directory, 'delivery-marker');
+    await fs.mkdir(path.join(oldRoot, 'nested'), {recursive: true});
+    await fs.writeFile(path.join(oldRoot, 'nested', 'target.txt'), 'target');
+
+    const pending = [];
+    const subscription = await watcher.subscribe(directory, (error, events) => {
+      dispatchEvents(pending, error, events);
+    });
+    t.after(async () => {
+      await subscription.unsubscribe();
+      await fs.rm(directory, {recursive: true, force: true});
+    });
+
+    let eventsPromise = waitForEvents(pending, (events) =>
+      containsEvent(events, 'create', marker),
+    );
+    await fs.rename(oldRoot, middleRoot);
+    await fs.rename(middleRoot, newRoot);
+    await fs.writeFile(marker, 'marker');
+    await eventsPromise;
+
+    eventsPromise = waitForEvents(pending, (events) =>
+      containsEvent(events, 'create', source),
+    );
+    await fs.writeFile(source, 'source');
+    await eventsPromise;
+
+    eventsPromise = waitForEvents(pending, (events) =>
+      containsEvent(events, 'delete', source) &&
+      events.some((event) => event.path === target),
+    );
+    await fs.rename(source, target);
+    const replacementEvents = await eventsPromise;
+    assert.ok(replacementEvents.every((event) => event.renameId === undefined));
+  },
+);
+
+test(
   'does not assign a rename id when only one side is watched',
   {skip: !exactRenamePlatform},
   async (t) => {

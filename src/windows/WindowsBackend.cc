@@ -308,30 +308,41 @@ public:
       }
       case FILE_ACTION_RENAMED_NEW_NAME: {
         WIN32_FILE_ATTRIBUTE_DATA data;
-        if (GetFileAttributesExW(utf8ToUtf16(path).data(), GetFileExInfoStandard, &data)) {
-          if (mPendingRenamePath.has_value()) {
-            bool targetExisted = mTree->find(path) != nullptr;
-            if (targetExisted) {
-              mWatcher->mEvents.remove(*mPendingRenamePath);
-              mWatcher->mEvents.create(path);
-              mTree->remove(*mPendingRenamePath);
-              mTree->remove(path);
-              mTree->add(path, CONVERT_TIME(data.ftLastWriteTime), data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY);
-            } else {
-              mWatcher->mEvents.rename(
-                *mPendingRenamePath,
-                path,
-                "windows:" + std::to_string(++mRenameSequence)
-              );
-              mTree->rename(*mPendingRenamePath, path);
-              if (mTree->update(path, CONVERT_TIME(data.ftLastWriteTime)) == nullptr) {
-                mTree->add(path, CONVERT_TIME(data.ftLastWriteTime), data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY);
-              }
-            }
-            mPendingRenamePath.reset();
+        bool hasAttributes = GetFileAttributesExW(
+          utf8ToUtf16(path).data(),
+          GetFileExInfoStandard,
+          &data
+        );
+        // A later rename may already have removed this intermediate path.
+        // The paired notification still provides enough information to move
+        // the known tree; attributes only refresh its current root entry.
+        if (mPendingRenamePath.has_value()) {
+          bool targetExisted = mTree->find(path) != nullptr;
+          if (targetExisted) {
+            mWatcher->mEvents.remove(*mPendingRenamePath);
+            mWatcher->mEvents.create(path);
+            mTree->remove(path);
           } else {
-            addPath(path);
+            mWatcher->mEvents.rename(
+              *mPendingRenamePath,
+              path,
+              "windows:" + std::to_string(++mRenameSequence)
+            );
           }
+          mTree->rename(*mPendingRenamePath, path);
+          if (
+            hasAttributes &&
+            mTree->update(path, CONVERT_TIME(data.ftLastWriteTime)) == nullptr
+          ) {
+            mTree->add(
+              path,
+              CONVERT_TIME(data.ftLastWriteTime),
+              data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY
+            );
+          }
+          mPendingRenamePath.reset();
+        } else if (hasAttributes) {
+          addPath(path);
         }
         break;
       }
