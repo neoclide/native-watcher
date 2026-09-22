@@ -46,8 +46,11 @@ async function runParent(mode) {
   const middleChild = path.join(middleRoot, 'nested', 'existing');
   const newChild = path.join(newRoot, 'nested', 'existing');
   const marker = path.join(root, 'delivery-marker');
+  const expiryProbe = path.join(root, 'expiry-probe');
+  const expiredProbe = path.join(parent, 'expired-probe');
   await fs.mkdir(path.dirname(oldChild), {recursive: true});
   await fs.writeFile(oldChild, 'before');
+  await fs.mkdir(expiryProbe);
 
   const options = mode === 'ignore'
     ? {ignore: ['old/nested']}
@@ -87,8 +90,16 @@ async function runParent(mode) {
     } else {
       await fs.rename(oldRoot, newRoot);
     }
+    await fs.rename(expiryProbe, expiredProbe);
     child.kill('SIGCONT');
-    await delay(200);
+    await waitFor(
+      () => messages.slice(operationMark).some((message) =>
+        message.events?.some(
+          (event) => event.type === 'delete' && event.path === expiryProbe,
+        ),
+      ),
+      'pending move expiry',
+    );
 
     const mark = messages.length;
     const expectedChild = mode === 'reuse' ? oldChild : newChild;

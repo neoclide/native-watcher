@@ -13,6 +13,7 @@ const exactRenamePlatform =
   process.platform === 'win32';
 
 function waitForEvents(queue, predicate = () => true, timeout = 5000) {
+  if (queue.error) return Promise.reject(queue.error);
   return new Promise((resolve, reject) => {
     const timer = setTimeout(() => reject(new Error('timed out waiting for events')), timeout);
     queue.push({
@@ -31,17 +32,50 @@ function waitForEvents(queue, predicate = () => true, timeout = 5000) {
 }
 
 function dispatchEvents(queue, error, events) {
+  let failure = error;
+  if (!failure) {
+    try {
+      assertRenameIdsArePaired(events);
+    } catch (assertionError) {
+      failure = assertionError;
+    }
+  }
+
   const next = queue[0];
-  if (!next) return;
-  if (error) {
-    queue.shift();
-    next.reject(error);
-  } else {
+  if (failure) {
+    if (next) {
+      queue.shift();
+      next.reject(failure);
+    } else {
+      queue.error = failure;
+    }
+    return;
+  }
+  if (next) {
     next.events.push(...events);
     if (next.predicate(next.events)) {
       queue.shift();
       next.resolve(next.events);
     }
+  }
+}
+
+function assertRenameIdsArePaired(events) {
+  const pairs = new Map();
+  for (const event of events) {
+    if (event.renameId === undefined) continue;
+    const counts = pairs.get(event.renameId) ?? {create: 0, delete: 0, other: 0};
+    if (event.type === 'create') counts.create++;
+    else if (event.type === 'delete') counts.delete++;
+    else counts.other++;
+    pairs.set(event.renameId, counts);
+  }
+  for (const [renameId, counts] of pairs) {
+    assert.deepEqual(
+      counts,
+      {create: 1, delete: 1, other: 0},
+      `rename ${renameId} must be complete within one callback batch`,
+    );
   }
 }
 

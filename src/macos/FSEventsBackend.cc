@@ -23,6 +23,20 @@ void stopStream(FSEventStreamRef stream, CFRunLoopRef runLoop) {
   FSEventStreamRelease(stream);
 }
 
+void flushStreamCallbacks(
+  FSEventStreamRef stream,
+  CFRunLoopRef runLoop
+) {
+  FSEventStreamFlushSync(stream);
+  Signal barrier;
+  Signal *barrierPointer = &barrier;
+  CFRunLoopPerformBlock(runLoop, kCFRunLoopDefaultMode, ^ {
+    barrierPointer->notify();
+  });
+  CFRunLoopWakeUp(runLoop);
+  barrier.wait();
+}
+
 struct WatcherContext {
   std::atomic<size_t> references {1};
   WatcherRef watcher;
@@ -645,19 +659,22 @@ void FSEventsBackend::startStream(WatcherRef watcher, FSEventStreamEventId id) {
     state->identities = std::move(identities);
   }
 
-  // Events can arrive while the initial identity index is being scanned.
-  // Drain those batches before allowing the callback to process live events.
+  // Events can arrive while the initial identity index is being scanned. The
+  // recorded paths may already be stale after a rename chain, so reconcile
+  // against the current filesystem until a scan completes without receiving
+  // another event batch.
   while (watcher->state != nullptr) {
-    std::vector<PendingEvent> pending;
+    flushStreamCallbacks(stream, mRunLoop);
     {
       std::lock_guard<std::mutex> lock(state->initializationMutex);
       if (state->pendingEvents.empty()) {
         state->initializing = false;
         break;
       }
-      pending.swap(state->pendingEvents);
+      state->pendingEvents.clear();
     }
-    processEvents(stream, watcher, pending);
+    reconcileFullTree(watcher, state);
+    watcher->notify();
   }
 }
 

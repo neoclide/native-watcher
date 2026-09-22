@@ -201,13 +201,19 @@ IdentityIndex scanIdentityIndex(
   FTSENT *node;
   while ((node = fts_read(fts)) != nullptr) {
     if (node->fts_info == FTS_DP) continue;
+    std::string path(node->fts_path);
     if (node->fts_errno != 0) {
       int error = node->fts_errno;
+      if (
+        path != root &&
+        (error == ENOENT || error == ENOTDIR)
+      ) {
+        continue;
+      }
       fts_close(fts);
       throw std::runtime_error(strerror(error));
     }
 
-    std::string path(node->fts_path);
     if (path != root && isIgnored(path)) {
       if (node->fts_info == FTS_D) fts_set(fts, node, FTS_SKIP);
       continue;

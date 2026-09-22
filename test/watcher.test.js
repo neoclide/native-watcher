@@ -39,6 +39,48 @@ test('reports create, update, and delete for a file', async (t) => {
   assertEvent(await deleted, 'delete', file);
 });
 
+test('rapid file changes do not leave a stale final event state', async (t) => {
+  const {directory, collector} = await createFixture(t);
+  const ephemeral = path.join(directory, 'ephemeral.txt');
+  const replaced = path.join(directory, 'replaced.txt');
+
+  let mark = collector.mark();
+  let marker = path.join(directory, 'first-marker');
+  let observed = collector.waitFor('create', marker, mark);
+  await fs.writeFile(ephemeral, 'temporary');
+  await fs.unlink(ephemeral);
+  await fs.writeFile(marker, 'marker');
+  await observed;
+  const ephemeralEvents = collector.events
+    .slice(mark)
+    .filter((event) => event.path === ephemeral);
+  assert.ok(
+    ephemeralEvents.length === 0 ||
+      ephemeralEvents.at(-1).type === 'delete',
+    `short-lived path ended as present: ${JSON.stringify(ephemeralEvents)}`,
+  );
+
+  observed = collector.waitFor('create', replaced);
+  await fs.writeFile(replaced, 'before');
+  await observed;
+
+  mark = collector.mark();
+  marker = path.join(directory, 'second-marker');
+  observed = collector.waitFor('create', marker, mark);
+  await fs.unlink(replaced);
+  await fs.writeFile(replaced, 'after');
+  await fs.writeFile(marker, 'marker');
+  await observed;
+  const replacementEvents = collector.events
+    .slice(mark)
+    .filter((event) => event.path === replaced);
+  assert.ok(
+    replacementEvents.length === 0 ||
+      replacementEvents.at(-1).type !== 'delete',
+    `recreated path ended as deleted: ${JSON.stringify(replacementEvents)}`,
+  );
+});
+
 test('recursively reports nested file and directory changes', async (t) => {
   const {directory, collector} = await createFixture(t);
   const parent = path.join(directory, 'parent');
@@ -97,6 +139,42 @@ test('watches a nested directory tree that existed before subscription', async (
   waiting = collector.waitFor('update', existingFile, mark);
   await fs.writeFile(existingFile, 'two');
   assertEvent(await waiting, 'update', existingFile);
+});
+
+test('remains usable when a subtree changes during initial scanning', async () => {
+  const directory = await fs.mkdtemp(
+    path.join(await fs.realpath(os.tmpdir()), 'native-watcher-scan-race-'),
+  );
+  const first = path.join(directory, 'moving-a');
+  const second = path.join(directory, 'moving-b');
+  await fs.mkdir(first);
+  await fs.writeFile(path.join(first, 'child.txt'), 'before');
+  for (let index = 0; index < 64; index++) {
+    const nested = path.join(directory, `existing-${index}`, 'nested');
+    await fs.mkdir(nested, {recursive: true});
+    await fs.writeFile(path.join(nested, 'file.txt'), 'existing');
+  }
+
+  const collector = new EventCollector();
+  let current = first;
+  let next = second;
+  let subscription;
+  try {
+    const subscribing = watcher.subscribe(directory, collector.callback);
+    for (let index = 0; index < 8; index++) {
+      await fs.rename(current, next);
+      [current, next] = [next, current];
+    }
+    subscription = await subscribing;
+
+    const child = path.join(current, 'child.txt');
+    const observed = collector.waitFor('update', child);
+    await fs.appendFile(child, 'after');
+    assertEvent(await observed, 'update', child);
+  } finally {
+    if (subscription) await subscription.unsubscribe();
+    await fs.rm(directory, {recursive: true, force: true});
+  }
 });
 
 test('indexes and reports a populated directory moved into the root', async (t) => {
@@ -326,6 +404,93 @@ test('reports symlink creation and deletion without following its target', async
   assert.equal(await fs.readFile(target, 'utf8'), 'content');
 });
 
+test('does not follow a directory link created after subscription', async () => {
+  const tempRoot = await fs.realpath(os.tmpdir());
+  const parent = await fs.mkdtemp(
+    path.join(tempRoot, 'native-watcher-runtime-link-'),
+  );
+  const directory = path.join(parent, 'watched');
+  const outside = path.join(parent, 'outside');
+  const outsideFile = path.join(outside, 'external.txt');
+  const link = path.join(directory, 'external-link');
+  const linkedFile = path.join(link, 'external.txt');
+  await fs.mkdir(directory);
+  await fs.mkdir(outside);
+  await fs.writeFile(outsideFile, 'before');
+
+  const collector = new EventCollector();
+  const subscription = await watcher.subscribe(directory, collector.callback);
+  try {
+    let mark = collector.mark();
+    let observed = collector.waitFor('create', link, mark);
+    await fs.symlink(
+      outside,
+      link,
+      process.platform === 'win32' ? 'junction' : 'dir',
+    );
+    await observed;
+
+    mark = collector.mark();
+    const marker = path.join(directory, 'delivery-marker');
+    observed = collector.waitFor('create', marker, mark);
+    await fs.appendFile(outsideFile, 'after');
+    await fs.writeFile(marker, 'marker');
+    const events = await observed;
+    assertNoPath(events, linkedFile);
+    assert.ok(events.every((event) => event.path !== outsideFile));
+  } finally {
+    await subscription.unsubscribe();
+    await fs.rm(parent, {recursive: true, force: true});
+  }
+});
+
+test(
+  'keeps descendant paths after a case-only directory rename',
+  {skip: !['darwin', 'win32'].includes(process.platform)},
+  async () => {
+    const directory = await fs.mkdtemp(
+      path.join(await fs.realpath(os.tmpdir()), 'native-watcher-dir-case-'),
+    );
+    const oldDirectory = path.join(directory, 'folder');
+    const newDirectory = path.join(directory, 'FOLDER');
+    const oldChild = path.join(oldDirectory, 'child.txt');
+    const newChild = path.join(newDirectory, 'child.txt');
+    await fs.mkdir(oldDirectory);
+    await fs.writeFile(oldChild, 'before');
+
+    const collector = new EventCollector();
+    const subscription = await watcher.subscribe(directory, collector.callback);
+    try {
+      let mark = collector.mark();
+      let observed = collector.waitFrom(mark, (events) =>
+        events.some(
+          (event) => event.path === oldDirectory || event.path === newDirectory,
+        ),
+      );
+      await fs.rename(oldDirectory, newDirectory);
+      await observed;
+
+      mark = collector.mark();
+      const marker = path.join(directory, 'delivery-marker');
+      observed = collector.waitFrom(mark, (events) =>
+        events.some(
+          (event) => event.type === 'update' && event.path === newChild,
+        ) && events.some(
+          (event) => event.type === 'create' && event.path === marker,
+        ),
+      );
+      await fs.appendFile(newChild, 'after');
+      await fs.writeFile(marker, 'marker');
+      const events = await observed;
+      assertEvent(events, 'update', newChild);
+      assert.ok(events.every((event) => event.path !== oldChild));
+    } finally {
+      await subscription.unsubscribe();
+      await fs.rm(directory, {recursive: true, force: true});
+    }
+  },
+);
+
 test('supports multiple subscriptions for the same directory', async (t) => {
   const {directory, collector: first, subscription: firstSubscription} =
     await createFixture(t);
@@ -351,6 +516,100 @@ test('supports multiple subscriptions for the same directory', async (t) => {
   await stillWaiting;
   await settle();
   assert.equal(first.events.slice(afterUnsubscribe).length, 0);
+});
+
+test('an immediately unsubscribed subscription stays inactive', async () => {
+  const directory = await fs.mkdtemp(
+    path.join(await fs.realpath(os.tmpdir()), 'native-watcher-immediate-stop-'),
+  );
+  const retired = new EventCollector();
+  const first = await watcher.subscribe(directory, retired.callback);
+
+  try {
+    await first.unsubscribe();
+    const retainedCount = retired.events.length;
+    const active = new EventCollector();
+    const second = await watcher.subscribe(directory, active.callback);
+    try {
+      const file = path.join(directory, 'after-unsubscribe');
+      const observed = active.waitFor('create', file);
+      await fs.writeFile(file, 'event');
+      await observed;
+      assert.equal(retired.events.length, retainedCount);
+    } finally {
+      await second.unsubscribe();
+    }
+  } finally {
+    await first.unsubscribe();
+    await fs.rm(directory, {recursive: true, force: true});
+  }
+});
+
+test('unsubscribe drains in-flight delivery before resolving', async () => {
+  const directory = await fs.mkdtemp(
+    path.join(await fs.realpath(os.tmpdir()), 'native-watcher-delivery-stop-'),
+  );
+  const retired = new EventCollector();
+  const first = await watcher.subscribe(directory, retired.callback);
+
+  try {
+    await fs.writeFile(path.join(directory, 'possibly-in-flight'), 'event');
+    await first.unsubscribe();
+    const retainedCount = retired.events.length;
+
+    const active = new EventCollector();
+    const second = await watcher.subscribe(directory, active.callback);
+    try {
+      const marker = path.join(directory, 'post-unsubscribe-marker');
+      const observed = active.waitFor('create', marker);
+      await fs.writeFile(marker, 'marker');
+      await observed;
+      assert.equal(retired.events.length, retainedCount);
+    } finally {
+      await second.unsubscribe();
+    }
+  } finally {
+    await first.unsubscribe();
+    await fs.rm(directory, {recursive: true, force: true});
+  }
+});
+
+test('keeps parent and child root subscriptions independent', async () => {
+  const parent = await fs.mkdtemp(
+    path.join(await fs.realpath(os.tmpdir()), 'native-watcher-parent-root-'),
+  );
+  const child = path.join(parent, 'child');
+  await fs.mkdir(child);
+  const parentEvents = new EventCollector();
+  const childEvents = new EventCollector();
+  const parentSubscription = await watcher.subscribe(
+    parent,
+    parentEvents.callback,
+  );
+  const childSubscription = await watcher.subscribe(
+    child,
+    childEvents.callback,
+  );
+
+  try {
+    const sharedFile = path.join(child, 'shared.txt');
+    const parentObserved = parentEvents.waitFor('create', sharedFile);
+    const childObserved = childEvents.waitFor('create', sharedFile);
+    await fs.writeFile(sharedFile, 'one');
+    await Promise.all([parentObserved, childObserved]);
+
+    await parentSubscription.unsubscribe();
+    const parentMark = parentEvents.mark();
+    const childOnlyFile = path.join(child, 'child-only.txt');
+    const childOnlyObserved = childEvents.waitFor('create', childOnlyFile);
+    await fs.writeFile(childOnlyFile, 'two');
+    await childOnlyObserved;
+    assert.equal(parentEvents.events.length, parentMark);
+  } finally {
+    await parentSubscription.unsubscribe();
+    await childSubscription.unsubscribe();
+    await fs.rm(parent, {recursive: true, force: true});
+  }
 });
 
 test('keeps duplicate callback subscriptions independent', async () => {

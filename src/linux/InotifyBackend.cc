@@ -108,13 +108,18 @@ void InotifyBackend::subscribe(WatcherRef watcher) {
   // Build a full directory tree recursively, and watch each directory.
   std::shared_ptr<DirTree> tree = getTree(watcher);
 
-  for (auto it = tree->entries.begin(); it != tree->entries.end(); it++) {
-    if (it->second.isDir) {
-      bool success = watchDir(watcher, it->second.path, tree);
-      if (!success) {
-        throw WatcherError(std::string("inotify_add_watch on '") + it->second.path + std::string("' failed: ") + strerror(errno), watcher);
+  try {
+    for (auto it = tree->entries.begin(); it != tree->entries.end(); it++) {
+      if (it->second.isDir) {
+        bool success = watchDir(watcher, it->second.path, tree);
+        if (!success) {
+          throw WatcherError(std::string("inotify_add_watch on '") + it->second.path + std::string("' failed: ") + strerror(errno), watcher);
+        }
       }
     }
+  } catch (...) {
+    removeSubscriptions(watcher.get(), watcher->mDir);
+    throw;
   }
 }
 
@@ -437,7 +442,20 @@ bool InotifyBackend::handleSubscription(struct inotify_event *event, std::shared
       }
       if (!success) {
         if (!isMoveWithinRoot) sub->tree->remove(path);
-        return false;
+        int error = errno;
+        invalidate(watcher);
+        watcher->mEvents.error(
+          std::string("inotify_add_watch below '") + path +
+          std::string("' failed: ") + strerror(error)
+        );
+        removeSubscriptions(watcher.get(), watcher->mDir);
+        for (auto it = pendingMoves.begin(); it != pendingMoves.end();) {
+          if (it->second.watcher.get() == watcher.get()) {
+            it = pendingMoves.erase(it);
+          } else {
+            ++it;
+          }
+        }
       }
     }
   } else if (event->mask & (IN_MODIFY | IN_ATTRIB)) {

@@ -11,17 +11,25 @@ const TIMEOUT = 5000;
 class EventCollector {
   constructor() {
     this.events = [];
+    this.batches = [];
     this.error = null;
     this.waiters = new Set();
     this.callback = (error, events) => {
       if (error) this.error = error;
-      if (events) this.events.push(...events);
+      if (events) {
+        this.batches.push(events);
+        this.events.push(...events);
+      }
       for (const notify of this.waiters) notify();
     };
   }
 
   mark() {
     return this.events.length;
+  }
+
+  batchMark() {
+    return this.batches.length;
   }
 
   async waitFrom(mark, predicate, timeout = TIMEOUT) {

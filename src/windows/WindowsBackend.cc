@@ -3,6 +3,7 @@
 #include <cwchar>
 #include <atomic>
 #include <cstddef>
+#include <unordered_set>
 #include "../DirTree.hh"
 #include "../shared/BruteForceBackend.hh"
 #include "./WindowsBackend.hh"
@@ -252,6 +253,7 @@ public:
     poll();
 
     // Read change events
+    mRemovedPaths.clear();
     BYTE *base = mReadBuffer.data();
     BYTE *end = base + numBytes;
     while (base < end) {
@@ -289,6 +291,7 @@ public:
     }
 
     flushPendingRename();
+    mRemovedPaths.clear();
 
     mWatcher->notify();
   }
@@ -303,6 +306,7 @@ public:
     switch (info->Action) {
       case FILE_ACTION_ADDED: {
         flushPendingRename();
+        mRemovedPaths.erase(path);
         addPath(path);
         break;
       }
@@ -317,7 +321,8 @@ public:
         // The paired notification still provides enough information to move
         // the known tree; attributes only refresh its current root entry.
         if (mPendingRenamePath.has_value()) {
-          bool targetExisted = mTree->find(path) != nullptr;
+          bool targetExisted = mTree->find(path) != nullptr ||
+            mRemovedPaths.erase(path) > 0;
           if (targetExisted) {
             mWatcher->mEvents.remove(*mPendingRenamePath);
             mWatcher->mEvents.create(path);
@@ -359,6 +364,7 @@ public:
       }
       case FILE_ACTION_REMOVED:
         flushPendingRename();
+        mRemovedPaths.insert(path);
         mWatcher->mEvents.remove(path);
         mTree->remove(path);
         break;
@@ -467,6 +473,7 @@ private:
   bool mOverflowed = false;
   Signal mStoppedSignal;
   std::optional<std::string> mPendingRenamePath;
+  std::unordered_set<std::string> mRemovedPaths;
   uint64_t mRenameSequence = 0;
   HANDLE mDirectoryHandle;
   std::vector<BYTE> mReadBuffer;
