@@ -12,10 +12,12 @@ const exactRenamePlatform =
   process.platform === 'linux' ||
   process.platform === 'win32';
 
-function waitForEvents(queue, timeout = 5000) {
+function waitForEvents(queue, predicate = () => true, timeout = 5000) {
   return new Promise((resolve, reject) => {
     const timer = setTimeout(() => reject(new Error('timed out waiting for events')), timeout);
     queue.push({
+      events: [],
+      predicate,
       resolve(events) {
         clearTimeout(timer);
         resolve(events);
@@ -26,6 +28,32 @@ function waitForEvents(queue, timeout = 5000) {
       },
     });
   });
+}
+
+function dispatchEvents(queue, error, events) {
+  const next = queue[0];
+  if (!next) return;
+  if (error) {
+    queue.shift();
+    next.reject(error);
+  } else {
+    next.events.push(...events);
+    if (next.predicate(next.events)) {
+      queue.shift();
+      next.resolve(next.events);
+    }
+  }
+}
+
+function containsEvent(events, type, eventPath) {
+  return events.some((event) => event.type === type && event.path === eventPath);
+}
+
+function containsRename(events, oldPath, newPath) {
+  return (
+    containsEvent(events, 'delete', oldPath) &&
+    containsEvent(events, 'create', newPath)
+  );
 }
 
 function assertRename(events, oldPath, newPath) {
@@ -47,10 +75,7 @@ test('native subscription emits filesystem events', async (t) => {
   const directory = await fs.mkdtemp(path.join(tempDirectory, 'native-watcher-'));
   const pending = [];
   const subscription = await watcher.subscribe(directory, (error, events) => {
-    const next = pending.shift();
-    if (!next) return;
-    if (error) next.reject(error);
-    else next.resolve(events);
+    dispatchEvents(pending, error, events);
   });
 
   t.after(async () => {
@@ -59,7 +84,9 @@ test('native subscription emits filesystem events', async (t) => {
   });
 
   const file = path.join(directory, 'created.txt');
-  const eventsPromise = waitForEvents(pending);
+  const eventsPromise = waitForEvents(pending, (events) =>
+    containsEvent(events, 'create', file),
+  );
   await fs.writeFile(file, 'content');
   const events = await eventsPromise;
   assert.ok(
@@ -75,10 +102,7 @@ test(
     const directory = await fs.mkdtemp(path.join(tempDirectory, 'native-watcher-'));
     const pending = [];
     const subscription = await watcher.subscribe(directory, (error, events) => {
-      const next = pending.shift();
-      if (!next) return;
-      if (error) next.reject(error);
-      else next.resolve(events);
+      dispatchEvents(pending, error, events);
     });
 
     t.after(async () => {
@@ -88,32 +112,44 @@ test(
 
     const oldFile = path.join(directory, 'old.txt');
     const newFile = path.join(directory, 'new.txt');
-    let eventsPromise = waitForEvents(pending);
+    let eventsPromise = waitForEvents(pending, (events) =>
+      containsEvent(events, 'create', oldFile),
+    );
     await fs.writeFile(oldFile, 'content');
     await eventsPromise;
 
-    eventsPromise = waitForEvents(pending);
+    eventsPromise = waitForEvents(pending, (events) =>
+      containsRename(events, oldFile, newFile),
+    );
     await fs.rename(oldFile, newFile);
     assertRename(await eventsPromise, oldFile, newFile);
 
     const oldDirectory = path.join(directory, 'old-directory');
     const newDirectory = path.join(directory, 'new-directory');
-    eventsPromise = waitForEvents(pending);
+    eventsPromise = waitForEvents(pending, (events) =>
+      containsEvent(events, 'create', oldDirectory),
+    );
     await fs.mkdir(oldDirectory);
     await eventsPromise;
 
     const oldChild = path.join(oldDirectory, 'child.txt');
-    eventsPromise = waitForEvents(pending);
+    eventsPromise = waitForEvents(pending, (events) =>
+      containsEvent(events, 'create', oldChild),
+    );
     await fs.writeFile(oldChild, 'content');
     await eventsPromise;
 
-    eventsPromise = waitForEvents(pending);
+    eventsPromise = waitForEvents(pending, (events) =>
+      containsRename(events, oldDirectory, newDirectory),
+    );
     await fs.rename(oldDirectory, newDirectory);
     assertRename(await eventsPromise, oldDirectory, newDirectory);
 
     const movedChild = path.join(newDirectory, 'child.txt');
     const renamedChild = path.join(newDirectory, 'renamed-child.txt');
-    eventsPromise = waitForEvents(pending);
+    eventsPromise = waitForEvents(pending, (events) =>
+      containsRename(events, movedChild, renamedChild),
+    );
     await fs.rename(movedChild, renamedChild);
     assertRename(await eventsPromise, movedChild, renamedChild);
   },
@@ -131,10 +167,7 @@ test(
 
     const pending = [];
     const subscription = await watcher.subscribe(directory, (error, events) => {
-      const next = pending.shift();
-      if (!next) return;
-      if (error) next.reject(error);
-      else next.resolve(events);
+      dispatchEvents(pending, error, events);
     });
 
     t.after(async () => {
@@ -142,7 +175,9 @@ test(
       await fs.rm(directory, {recursive: true, force: true});
     });
 
-    const eventsPromise = waitForEvents(pending);
+    const eventsPromise = waitForEvents(pending, (events) =>
+      containsRename(events, oldPath, newPath),
+    );
     await fs.rename(oldPath, newPath);
     assertRename(await eventsPromise, oldPath, newPath);
   },
@@ -156,10 +191,7 @@ test(
     const directory = await fs.mkdtemp(path.join(tempDirectory, 'native-watcher-'));
     const pending = [];
     const subscription = await watcher.subscribe(directory, (error, events) => {
-      const next = pending.shift();
-      if (!next) return;
-      if (error) next.reject(error);
-      else next.resolve(events);
+      dispatchEvents(pending, error, events);
     });
 
     t.after(async () => {
@@ -171,15 +203,22 @@ test(
     const linked = path.join(directory, 'linked.txt');
     const renamed = path.join(directory, 'renamed.txt');
 
-    let eventsPromise = waitForEvents(pending);
+    let eventsPromise = waitForEvents(pending, (events) =>
+      containsEvent(events, 'create', original),
+    );
     await fs.writeFile(original, 'content');
     await eventsPromise;
 
-    eventsPromise = waitForEvents(pending);
+    eventsPromise = waitForEvents(pending, (events) =>
+      containsEvent(events, 'create', linked),
+    );
     await fs.link(original, linked);
     await eventsPromise;
 
-    eventsPromise = waitForEvents(pending);
+    eventsPromise = waitForEvents(pending, (events) =>
+      events.some((event) => event.path === original) &&
+      events.some((event) => event.path === renamed),
+    );
     await fs.rename(original, renamed);
     const events = await eventsPromise;
     assert.ok(events.some((event) => event.path === original));
@@ -196,10 +235,7 @@ test(
     const directory = await fs.mkdtemp(path.join(tempDirectory, 'native-watcher-'));
     const pending = [];
     const subscription = await watcher.subscribe(directory, (error, events) => {
-      const next = pending.shift();
-      if (!next) return;
-      if (error) next.reject(error);
-      else next.resolve(events);
+      dispatchEvents(pending, error, events);
     });
 
     t.after(async () => {
@@ -211,28 +247,43 @@ test(
     const target = path.join(directory, 'target.txt');
     const finalPath = path.join(directory, 'final.txt');
 
-    let eventsPromise = waitForEvents(pending);
+    let eventsPromise = waitForEvents(pending, (events) =>
+      containsEvent(events, 'create', source),
+    );
     await fs.writeFile(source, 'source');
     await eventsPromise;
 
-    eventsPromise = waitForEvents(pending);
+    eventsPromise = waitForEvents(pending, (events) =>
+      containsEvent(events, 'create', target),
+    );
     await fs.writeFile(target, 'target');
     await eventsPromise;
 
     const timestamp = new Date(1_700_000_000_000);
-    eventsPromise = waitForEvents(pending);
+    eventsPromise = waitForEvents(pending, (events) =>
+      events.some(
+        (event) =>
+          event.type === 'update' &&
+          (event.path === source || event.path === target),
+      ),
+    );
     await Promise.all([
       fs.utimes(source, timestamp, timestamp),
       fs.utimes(target, timestamp, timestamp),
     ]);
     await eventsPromise;
 
-    eventsPromise = waitForEvents(pending);
+    eventsPromise = waitForEvents(pending, (events) =>
+      containsEvent(events, 'delete', source) &&
+      events.some((event) => event.path === target),
+    );
     await fs.rename(source, target);
     const replacementEvents = await eventsPromise;
     assert.ok(replacementEvents.every((event) => event.renameId === undefined));
 
-    eventsPromise = waitForEvents(pending);
+    eventsPromise = waitForEvents(pending, (events) =>
+      containsRename(events, target, finalPath),
+    );
     await fs.rename(target, finalPath);
     assertRename(await eventsPromise, target, finalPath);
   },
@@ -248,10 +299,7 @@ test(
     await fs.mkdir(directory);
     const pending = [];
     const subscription = await watcher.subscribe(directory, (error, events) => {
-      const next = pending.shift();
-      if (!next) return;
-      if (error) next.reject(error);
-      else next.resolve(events);
+      dispatchEvents(pending, error, events);
     });
 
     t.after(async () => {
@@ -261,11 +309,15 @@ test(
 
     const inside = path.join(directory, 'inside.txt');
     const outside = path.join(parent, 'outside.txt');
-    let eventsPromise = waitForEvents(pending);
+    let eventsPromise = waitForEvents(pending, (events) =>
+      containsEvent(events, 'create', inside),
+    );
     await fs.writeFile(inside, 'content');
     await eventsPromise;
 
-    eventsPromise = waitForEvents(pending);
+    eventsPromise = waitForEvents(pending, (events) =>
+      containsEvent(events, 'delete', inside),
+    );
     await fs.rename(inside, outside);
     const events = await eventsPromise;
     const removed = events.find(
