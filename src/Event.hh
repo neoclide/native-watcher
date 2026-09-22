@@ -12,12 +12,20 @@
 
 using namespace Napi;
 
+enum class EntryKind { File, Directory };
+
+inline EntryKind entryKind(bool isDirectory) {
+  return isDirectory ? EntryKind::Directory : EntryKind::File;
+}
+
 struct Event {
   std::string path;
+  EntryKind kind;
   bool isCreated;
   bool isDeleted;
   std::optional<std::string> renameId;
-  Event(std::string path) : path(path), isCreated(false), isDeleted(false) {}
+  Event(std::string path, EntryKind kind) :
+    path(path), kind(kind), isCreated(false), isDeleted(false) {}
 
   Value toJS(const Env& env) {
     EscapableHandleScope scope(env);
@@ -25,6 +33,9 @@ struct Event {
     std::string type = isCreated ? "create" : isDeleted ? "delete" : "update";
     res.Set(String::New(env, "path"), String::New(env, path.c_str()));
     res.Set(String::New(env, "type"), String::New(env, type.c_str()));
+    res.Set(String::New(env, "kind"), String::New(
+      env, kind == EntryKind::Directory ? "directory" : "file"
+    ));
     if (renameId.has_value()) {
       res.Set(String::New(env, "renameId"), String::New(env, renameId->c_str()));
     }
@@ -39,9 +50,9 @@ struct EventBatch {
 
 class EventList {
 public:
-  void create(std::string path) {
+  void create(std::string path, EntryKind kind) {
     std::lock_guard<std::mutex> l(mMutex);
-    Event *event = internalUpdate(path);
+    Event *event = internalUpdate(path, kind);
     if (event->isDeleted) {
       // Assume update event when rapidly removed and created
       // https://github.com/parcel-bundler/watcher/issues/72
@@ -52,7 +63,12 @@ public:
     }
   }
 
-  void rename(std::string oldPath, std::string newPath, std::string renameId) {
+  void rename(
+    std::string oldPath,
+    std::string newPath,
+    std::string renameId,
+    EntryKind kind
+  ) {
     std::lock_guard<std::mutex> l(mMutex);
     auto old = mEvents.find(oldPath);
 
@@ -62,17 +78,17 @@ public:
     if (old != mEvents.end() && old->second.isCreated) {
       auto originalRenameId = old->second.renameId;
       mEvents.erase(old);
-      Event *created = internalUpdate(newPath);
+      Event *created = internalUpdate(newPath, kind);
       created->isCreated = true;
       created->isDeleted = false;
       created->renameId = originalRenameId;
       return;
     }
 
-    Event *removed = internalUpdate(oldPath);
+    Event *removed = internalUpdate(oldPath, kind);
     removed->isDeleted = true;
 
-    Event *created = internalUpdate(newPath);
+    Event *created = internalUpdate(newPath, kind);
     if (created->isDeleted) {
       // Match create(): replacing a path that was already deleted in this
       // batch is an update, so there is no delete/create pair to correlate.
@@ -86,14 +102,14 @@ public:
     }
   }
 
-  Event *update(std::string path) {
+  Event *update(std::string path, EntryKind kind) {
     std::lock_guard<std::mutex> l(mMutex);
-    return internalUpdate(path);
+    return internalUpdate(path, kind);
   }
 
-  void remove(std::string path) {
+  void remove(std::string path, EntryKind kind) {
     std::lock_guard<std::mutex> l(mMutex);
-    Event *event = internalUpdate(path);
+    Event *event = internalUpdate(path, kind);
     event->isDeleted = true;
     event->renameId.reset();
   }
@@ -159,13 +175,14 @@ private:
   mutable std::mutex mMutex;
   std::map<std::string, Event> mEvents;
   std::optional<std::string> mError;
-  Event *internalUpdate(std::string path) {
+  Event *internalUpdate(std::string path, EntryKind kind) {
     auto found = mEvents.find(path);
     if (found == mEvents.end()) {
-      auto it = mEvents.emplace(path, Event(path));
+      auto it = mEvents.emplace(path, Event(path, kind));
       return &it.first->second;
     }
 
+    found->second.kind = kind;
     return &found->second;
   }
 };

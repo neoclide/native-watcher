@@ -46,6 +46,10 @@ void BruteForceBackend::readTree(WatcherRef watcher, std::shared_ptr<DirTree> tr
         if (watcher->isIgnored(fullPath)) {
           continue;
         }
+        if (ffd.dwFileAttributes &
+            (FILE_ATTRIBUTE_REPARSE_POINT | FILE_ATTRIBUTE_DEVICE)) {
+          continue;
+        }
 
         tree->add(fullPath, CONVERT_TIME(ffd.ftLastWriteTime), ffd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY);
         if (
@@ -235,8 +239,7 @@ public:
         DWORD attrs = GetFileAttributesW(utf8ToUtf16(mWatcher->mDir).data());
         bool isDir = attrs != INVALID_FILE_ATTRIBUTES && (attrs & FILE_ATTRIBUTE_DIRECTORY);
         if (!isDir) {
-          mWatcher->mEvents.remove(mWatcher->mDir);
-          mTree->remove(mWatcher->mDir);
+          removePath(mWatcher->mDir);
           mWatcher->notify();
           invalidateCurrent();
           requestStop();
@@ -329,6 +332,8 @@ public:
           GetFileExInfoStandard,
           &data
         );
+        bool supported = !hasAttributes || !(data.dwFileAttributes &
+          (FILE_ATTRIBUTE_REPARSE_POINT | FILE_ATTRIBUTE_DEVICE));
         // A later rename may already have removed this intermediate path.
         // The paired notification still provides enough information to move
         // the known tree; attributes only refresh its current root entry.
@@ -336,30 +341,53 @@ public:
           bool targetExisted = mTree->find(path) != nullptr ||
             mRemovedPaths.erase(path) > 0 ||
             mPreviousRemovedPaths.erase(path) > 0;
-          if (targetExisted) {
-            mWatcher->mEvents.remove(*mPendingRenamePath);
-            mWatcher->mEvents.create(path);
-            mTree->remove(path);
-          } else {
-            mWatcher->mEvents.rename(
-              *mPendingRenamePath,
-              path,
-              "windows:" + std::to_string(++mRenameSequence)
-            );
+          std::string oldPath = *mPendingRenamePath;
+          auto moved = mTree->extract(oldPath);
+          if (targetExisted) mTree->remove(path);
+          std::string renameId =
+            "windows:" + std::to_string(++mRenameSequence);
+          for (const auto &entry : moved) {
+            std::string newPath = path + entry.path.substr(oldPath.size());
+            EntryKind kind = entryKind(entry.isDir);
+            if (targetExisted || !supported || mWatcher->isIgnored(newPath)) {
+              mWatcher->mEvents.remove(entry.path, kind);
+              if (supported && !mWatcher->isIgnored(newPath)) {
+                mWatcher->mEvents.create(newPath, kind);
+              }
+            } else {
+              mWatcher->mEvents.rename(
+                entry.path,
+                newPath,
+                renameId + ":" + entry.path.substr(oldPath.size()),
+                kind
+              );
+            }
           }
-          mTree->rename(*mPendingRenamePath, path);
-          if (
-            hasAttributes &&
-            mTree->update(path, CONVERT_TIME(data.ftLastWriteTime)) == nullptr
-          ) {
+          if (supported) {
+            std::vector<DirEntry> visible;
+            for (const auto &entry : moved) {
+              if (!mWatcher->isIgnored(
+                path + entry.path.substr(oldPath.size())
+              )) visible.push_back(entry);
+            }
+            mTree->restore(std::move(visible), oldPath, path);
+          }
+          if (hasAttributes && supported &&
+              mTree->update(path, CONVERT_TIME(data.ftLastWriteTime)) == nullptr) {
             mTree->add(
               path,
               CONVERT_TIME(data.ftLastWriteTime),
               data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY
             );
           }
+          if (hasAttributes && supported &&
+              (data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) &&
+              (!mWatcher->mIgnorePaths.empty() ||
+               !mWatcher->mIgnoreGlobs.empty())) {
+            addPath(path);
+          }
           mPendingRenamePath.reset();
-        } else if (hasAttributes) {
+        } else if (hasAttributes && supported) {
           addPath(path);
         }
         break;
@@ -367,10 +395,13 @@ public:
       case FILE_ACTION_MODIFIED: {
         flushPendingRename();
         WIN32_FILE_ATTRIBUTE_DATA data;
-        if (GetFileAttributesExW(utf8ToUtf16(path).data(), GetFileExInfoStandard, &data)) {
+        if (GetFileAttributesExW(utf8ToUtf16(path).data(), GetFileExInfoStandard, &data) &&
+            !(data.dwFileAttributes &
+              (FILE_ATTRIBUTE_REPARSE_POINT | FILE_ATTRIBUTE_DEVICE)) &&
+            mTree->find(path) != nullptr) {
           mTree->update(path, CONVERT_TIME(data.ftLastWriteTime));
           if (!(data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) {
-            mWatcher->mEvents.update(path);
+            mWatcher->mEvents.update(path, EntryKind::File);
           }
         }
         break;
@@ -378,8 +409,7 @@ public:
       case FILE_ACTION_REMOVED:
         flushPendingRename();
         mRemovedPaths.insert(path);
-        mWatcher->mEvents.remove(path);
-        mTree->remove(path);
+        removePath(path);
         break;
       case FILE_ACTION_RENAMED_OLD_NAME:
         flushPendingRename();
@@ -405,10 +435,14 @@ public:
       )) {
         continue;
       }
+      if (data.dwFileAttributes &
+          (FILE_ATTRIBUTE_REPARSE_POINT | FILE_ATTRIBUTE_DEVICE)) continue;
 
       bool isDirectory = data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY;
-      mWatcher->mEvents.create(candidate);
-      mTree->add(candidate, CONVERT_TIME(data.ftLastWriteTime), isDirectory);
+      if (mTree->find(candidate) == nullptr) {
+        mWatcher->mEvents.create(candidate, entryKind(isDirectory));
+        mTree->add(candidate, CONVERT_TIME(data.ftLastWriteTime), isDirectory);
+      }
       if (!isDirectory || (data.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT)) {
         continue;
       }
@@ -434,9 +468,14 @@ public:
 
   void flushPendingRename() {
     if (mPendingRenamePath.has_value()) {
-      mWatcher->mEvents.remove(*mPendingRenamePath);
-      mTree->remove(*mPendingRenamePath);
+      removePath(*mPendingRenamePath);
       mPendingRenamePath.reset();
+    }
+  }
+
+  void removePath(const std::string &path) {
+    for (const auto &entry : mTree->extract(path)) {
+      mWatcher->mEvents.remove(entry.path, entryKind(entry.isDir));
     }
   }
 

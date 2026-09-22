@@ -1,9 +1,12 @@
 export type EventType = 'create' | 'update' | 'delete';
+export type EntryKind = 'file' | 'directory';
 
 export interface WatchEvent {
   /** Absolute path of the changed entry. */
   path: string;
   type: EventType;
+  /** Entry type, retained for deletion events after the path is gone. */
+  kind: EntryKind;
   /**
    * Opaque id present on both the delete and create sides when the backend can
    * correlate an unambiguous rename. Do not parse or persist this value.

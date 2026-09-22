@@ -176,16 +176,16 @@ void DirTree::getChanges(DirTree *snapshot, EventList &events) {
   for (auto it = entries.begin(); it != entries.end(); it++) {
     auto found = snapshot->entries.find(it->first);
     if (found == snapshot->entries.end()) {
-      events.create(it->second.path);
+      events.create(it->second.path, entryKind(it->second.isDir));
     } else if (found->second.mtime != it->second.mtime && !found->second.isDir && !it->second.isDir) {
-      events.update(it->second.path);
+      events.update(it->second.path, EntryKind::File);
     }
   }
 
   for (auto it = snapshot->entries.begin(); it != snapshot->entries.end(); it++) {
     size_t count = entries.count(it->first);
     if (count == 0) {
-      events.remove(it->second.path);
+      events.remove(it->second.path, entryKind(it->second.isDir));
     }
   }
 }

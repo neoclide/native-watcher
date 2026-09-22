@@ -26,17 +26,17 @@ test('reports create, update, and delete for a file', async (t) => {
   let mark = collector.mark();
   const created = collector.waitFor('create', file, mark);
   await fs.writeFile(file, 'one');
-  assertEvent(await created, 'create', file);
+  assert.equal((await created).find((event) => event.path === file).kind, 'file');
 
   mark = collector.mark();
   const updated = collector.waitFor('update', file, mark);
   await fs.writeFile(file, 'two');
-  assertEvent(await updated, 'update', file);
+  assert.equal((await updated).find((event) => event.path === file).kind, 'file');
 
   mark = collector.mark();
   const deleted = collector.waitFor('delete', file, mark);
   await fs.unlink(file);
-  assertEvent(await deleted, 'delete', file);
+  assert.equal((await deleted).find((event) => event.path === file).kind, 'file');
 });
 
 test('rapid file changes do not leave a stale final event state', async (t) => {
@@ -134,6 +134,8 @@ test('recursively reports nested file and directory changes', async (t) => {
   events = await waiting;
   assertEvent(events, 'delete', file);
   assertEvent(events, 'delete', childDirectory);
+  assert.equal(events.find((event) => event.path === file && event.type === 'delete').kind, 'file');
+  assert.equal(events.find((event) => event.path === childDirectory && event.type === 'delete').kind, 'directory');
 });
 
 test('watches a nested directory tree that existed before subscription', async (t) => {
@@ -238,6 +240,9 @@ test('indexes and reports a populated directory moved into the root', async (t) 
   assertEvent(events, 'create', moved);
   assertEvent(events, 'create', movedDirectory);
   assertEvent(events, 'create', movedChild);
+  assert.equal(events.find((event) => event.path === moved && event.type === 'create').kind, 'directory');
+  assert.equal(events.find((event) => event.path === movedDirectory && event.type === 'create').kind, 'directory');
+  assert.equal(events.find((event) => event.path === movedChild && event.type === 'create').kind, 'file');
 
   const renamedChild = path.join(movedDirectory, 'renamed.txt');
   mark = collector.mark();
@@ -385,6 +390,11 @@ test('does not report changes below a directory immediately moved out of the roo
   const subscription = await watcher.subscribe(directory, collector.callback);
 
   try {
+    const barrier = path.join(directory, 'startup-barrier');
+    const ready = collector.waitFor('create', barrier);
+    await fs.writeFile(barrier, 'ready');
+    await ready;
+
     const mark = collector.mark();
     const marker = path.join(directory, 'delivery-marker');
     const observed = collector.waitFrom(mark, (events) =>
@@ -414,7 +424,7 @@ test('does not report changes below a directory immediately moved out of the roo
   }
 });
 
-test('reports symlink creation and deletion without following its target', async (t) => {
+test('ignores symlink creation and deletion without following its target', async (t) => {
   const {directory, collector} = await createFixture(t);
   const target = path.join(directory, 'target.txt');
   const link = path.join(directory, 'link.txt');
@@ -425,15 +435,26 @@ test('reports symlink creation and deletion without following its target', async
   await waiting;
 
   mark = collector.mark();
-  waiting = collector.waitFor('create', link, mark);
   await fs.symlink(target, link, process.platform === 'win32' ? 'file' : undefined);
-  assertEvent(await waiting, 'create', link);
-
-  mark = collector.mark();
-  waiting = collector.waitFor('delete', link, mark);
   await fs.unlink(link);
-  assertEvent(await waiting, 'delete', link);
+  const marker = path.join(directory, 'symlink-barrier.txt');
+  waiting = collector.waitFor('create', marker, mark);
+  await fs.writeFile(marker, 'barrier');
+  const events = await waiting;
+  assert.ok(events.every((event) => event.path !== link));
   assert.equal(await fs.readFile(target, 'utf8'), 'content');
+});
+
+test('ignores FIFO entries', {skip: process.platform === 'win32'}, async (t) => {
+  const {directory, collector} = await createFixture(t);
+  const fifo = path.join(directory, 'pipe');
+  const marker = path.join(directory, 'fifo-barrier.txt');
+  const mark = collector.mark();
+  await execFileAsync('mkfifo', [fifo]);
+  const observed = collector.waitFor('create', marker, mark);
+  await fs.writeFile(marker, 'barrier');
+  const events = await observed;
+  assert.ok(events.every((event) => event.path !== fifo));
 });
 
 test('does not follow a directory link created after subscription', async () => {
@@ -454,20 +475,17 @@ test('does not follow a directory link created after subscription', async () => 
   const subscription = await watcher.subscribe(directory, collector.callback);
   try {
     let mark = collector.mark();
-    let observed = collector.waitFor('create', link, mark);
     await fs.symlink(
       outside,
       link,
       process.platform === 'win32' ? 'junction' : 'dir',
     );
-    await observed;
-
-    mark = collector.mark();
     const marker = path.join(directory, 'delivery-marker');
-    observed = collector.waitFor('create', marker, mark);
+    const observed = collector.waitFor('create', marker, mark);
     await fs.appendFile(outsideFile, 'after');
     await fs.writeFile(marker, 'marker');
     const events = await observed;
+    assertNoPath(events, link);
     assertNoPath(events, linkedFile);
     assert.ok(events.every((event) => event.path !== outsideFile));
   } finally {
@@ -493,11 +511,19 @@ test(
     const collector = new EventCollector();
     const subscription = await watcher.subscribe(directory, collector.callback);
     try {
+      const barrier = path.join(directory, 'startup-barrier');
+      const ready = collector.waitFor('create', barrier);
+      await fs.writeFile(barrier, 'ready');
+      await ready;
+
       let mark = collector.mark();
       let observed = collector.waitFrom(mark, (events) =>
-        events.some(
-          (event) => event.path === oldDirectory || event.path === newDirectory,
-        ),
+        events.some((event) =>
+          event.type === 'delete' && event.path === oldDirectory) &&
+        events.some((event) =>
+          event.type === 'create' && event.path === newDirectory) &&
+        events.some((event) =>
+          event.type === 'create' && event.path === newChild),
       );
       await fs.rename(oldDirectory, newDirectory);
       await observed;

@@ -89,24 +89,48 @@ using RenameCandidates = std::unordered_map<
   FileIdentityHash
 >;
 
+bool isDescendantPath(
+  const std::string &path,
+  const std::string &directory
+) {
+  return path.size() > directory.size() &&
+    path.compare(0, directory.size(), directory) == 0 &&
+    path[directory.size()] == '/';
+}
+
+void removeIndexedPath(State *state, EventList &events, const std::string &path) {
+  const IndexedPath *indexed = state->identities.find(path);
+  if (indexed == nullptr) return;
+  if (!indexed->isDirectory) {
+    events.remove(path, EntryKind::File);
+    state->identities.remove(path);
+    state->tree->remove(path);
+    return;
+  }
+  for (const auto &entry : state->identities.entries()) {
+    if (entry.first == path || isDescendantPath(entry.first, path)) {
+      events.remove(entry.first, entryKind(entry.second.isDirectory));
+    }
+  }
+  state->identities.remove(path);
+  state->tree->remove(path);
+}
+
 void addCreatedPath(
   WatcherRef watcher,
   State *state,
   EventList &events,
-  const std::string &path,
-  bool isDirectoryHint
+  const std::string &path
 ) {
   auto entry = readIndexedPath(path);
   if (!entry.has_value()) {
-    state->tree->add(path, 0, isDirectoryHint);
-    events.create(path);
     return;
   }
 
   if (!entry->isDirectory) {
     state->identities.add(path, *entry);
     state->tree->add(path, entry->mtime, false);
-    events.create(path);
+    events.create(path, EntryKind::File);
     return;
   }
 
@@ -128,7 +152,7 @@ void addCreatedPath(
         candidateEntry.mtime,
         candidateEntry.isDirectory
       );
-      events.create(candidate);
+      events.create(candidate, entryKind(candidateEntry.isDirectory));
     }
   );
 }
@@ -177,9 +201,8 @@ std::unordered_set<std::string> correlateRenames(
     // A pre-existing target is a replacement, and multiple links make inode
     // identity insufficient to prove which directory entry was renamed.
     if (state->identities.find(newCandidate.first) != nullptr ||
-        oldEntry.isDirectory != newEntry.isDirectory ||
-        (!oldEntry.isDirectory &&
-         (oldEntry.linkCount != 1 || newEntry.linkCount != 1))) {
+        oldEntry.isDirectory || newEntry.isDirectory ||
+        oldEntry.linkCount != 1 || newEntry.linkCount != 1) {
       continue;
     }
 
@@ -188,7 +211,8 @@ std::unordered_set<std::string> correlateRenames(
     watcher->mEvents.rename(
       oldCandidate.first,
       newCandidate.first,
-      renameId
+      renameId,
+      entryKind(oldEntry.isDirectory)
     );
 
     state->identities.rename(oldCandidate.first, newCandidate.first);
@@ -204,15 +228,6 @@ std::unordered_set<std::string> correlateRenames(
   }
 
   return handled;
-}
-
-bool isDescendantPath(
-  const std::string &path,
-  const std::string &directory
-) {
-  return path.size() > directory.size() &&
-    path.compare(0, directory.size(), directory) == 0 &&
-    path[directory.size()] == '/';
 }
 
 struct ReconciledRename {
@@ -311,14 +326,14 @@ void reconcileFullTree(WatcherRef watcher, State *state) {
       }
     }
 
-    if (!coveredByDirectory) {
-      acceptedRenames.push_back(candidate);
-      watcher->mEvents.rename(
-        candidate.oldPath,
-        candidate.newPath,
-        "fsevents:" + std::to_string(++state->renameSequence)
-      );
-    }
+    if (coveredByDirectory) continue;
+    acceptedRenames.push_back(candidate);
+    watcher->mEvents.rename(
+      candidate.oldPath,
+      candidate.newPath,
+      "fsevents:" + std::to_string(++state->renameSequence),
+      entryKind(candidate.entry.isDirectory)
+    );
     handledRemoved.insert(candidate.oldPath);
     handledCreated.insert(candidate.newPath);
   }
@@ -334,7 +349,14 @@ void reconcileFullTree(WatcherRef watcher, State *state) {
           accepted.newPath + path.first.substr(accepted.oldPath.size());
         const IndexedPath *newEntry = current.find(newPath);
         if (newEntry != nullptr &&
-            newEntry->identity == path.second.identity) {
+            newEntry->identity == path.second.identity &&
+            newEntry->isDirectory == path.second.isDirectory) {
+          watcher->mEvents.rename(
+            path.first,
+            newPath,
+            "fsevents:" + std::to_string(++state->renameSequence),
+            entryKind(path.second.isDirectory)
+          );
           handledRemoved.insert(path.first);
           handledCreated.insert(newPath);
         }
@@ -345,14 +367,18 @@ void reconcileFullTree(WatcherRef watcher, State *state) {
   for (const auto &entry : removed) {
     for (const auto &path : entry.second) {
       if (handledRemoved.count(path.first) == 0) {
-        watcher->mEvents.remove(path.first);
+        watcher->mEvents.remove(
+          path.first, entryKind(path.second.isDirectory)
+        );
       }
     }
   }
   for (const auto &entry : created) {
     for (const auto &path : entry.second) {
       if (handledCreated.count(path.first) == 0) {
-        watcher->mEvents.create(path.first);
+        watcher->mEvents.create(
+          path.first, entryKind(path.second.isDirectory)
+        );
       }
     }
   }
@@ -360,7 +386,7 @@ void reconcileFullTree(WatcherRef watcher, State *state) {
     const IndexedPath *before = state->identities.find(after.first);
     if (before != nullptr && before->identity == after.second.identity &&
         !after.second.isDirectory && before->mtime != after.second.mtime) {
-      watcher->mEvents.update(after.first);
+      watcher->mEvents.update(after.first, EntryKind::File);
     }
   }
 
@@ -390,6 +416,23 @@ void processEvents(
       );
     }
   );
+  if (!requiresRescan) {
+    // A directory rename can change paths for every descendant even when
+    // FSEvents reports only the parent. Compare the complete indexed trees.
+    requiresRescan = std::any_of(
+      events.begin(), events.end(),
+      [state](const PendingEvent &event) {
+        if (!hasFlag(event.flags, kFSEventStreamEventFlagItemRenamed)) {
+          return false;
+        }
+        const IndexedPath *before = state->identities.find(event.path);
+        auto after = readIndexedPath(event.path);
+        return hasFlag(event.flags, kFSEventStreamEventFlagItemIsDir) ||
+          (before != nullptr && before->isDirectory) ||
+          (after.has_value() && after->isDirectory);
+      }
+    );
+  }
   if (requiresRescan) {
     try {
       reconcileFullTree(watcher, state);
@@ -418,7 +461,6 @@ void processEvents(
       hasFlag(event.flags, kFSEventStreamEventFlagItemXattrMod);
     bool isRenamed = hasFlag(event.flags, kFSEventStreamEventFlagItemRenamed);
     bool isDone = hasFlag(event.flags, kFSEventStreamEventFlagHistoryDone);
-    bool isDir = hasFlag(event.flags, kFSEventStreamEventFlagItemIsDir);
 
     if (isDone) {
       watcher->notify();
@@ -437,24 +479,34 @@ void processEvents(
 
     if (isCreated && !(isRemoved || isModified || isRenamed)) {
       try {
-        addCreatedPath(watcher, state, list, event.path, isDir);
+        addCreatedPath(watcher, state, list, event.path);
       } catch (const std::exception &error) {
         list.error(error.what());
       }
     } else if (isRemoved && !(isCreated || isModified || isRenamed)) {
-      state->identities.remove(event.path);
-      state->tree->remove(event.path);
-      list.remove(event.path);
+      removeIndexedPath(state, list, event.path);
       if (event.path == watcher->mDir) deletedRoot = true;
     } else if (isModified && !(isCreated || isRemoved || isRenamed)) {
       auto indexed = readIndexedPath(event.path);
-      if (!indexed.has_value()) continue;
+      if (!indexed.has_value()) {
+        removeIndexedPath(state, list, event.path);
+        if (event.path == watcher->mDir) deletedRoot = true;
+        continue;
+      }
 
       const IndexedPath *previousIdentity =
         state->identities.find(event.path);
       bool sameIdentity = previousIdentity != nullptr &&
         previousIdentity->identity == indexed->identity;
       DirEntry *entry = state->tree->find(event.path);
+      if (previousIdentity == nullptr || entry == nullptr) {
+        try {
+          addCreatedPath(watcher, state, list, event.path);
+        } catch (const std::exception &error) {
+          list.error(error.what());
+        }
+        continue;
+      }
       if (!hasMetadataChange && entry && sameIdentity && entry->mtime == indexed->mtime &&
           indexed->mtime % 1000000000 != 0) {
         continue;
@@ -470,13 +522,11 @@ void processEvents(
           indexed->isDirectory
         );
       }
-      list.update(event.path);
+      list.update(event.path, entryKind(indexed->isDirectory));
     } else {
       auto indexed = readIndexedPath(event.path);
       if (!indexed.has_value()) {
-        state->identities.remove(event.path);
-        state->tree->remove(event.path);
-        list.remove(event.path);
+        removeIndexedPath(state, list, event.path);
         if (event.path == watcher->mDir) deletedRoot = true;
         continue;
       }
@@ -494,10 +544,10 @@ void processEvents(
       state->identities.add(event.path, *indexed);
       if (isModified && entry) {
         state->tree->update(event.path, indexed->mtime);
-        list.update(event.path);
+        list.update(event.path, entryKind(indexed->isDirectory));
       } else if (!sameIdentity && indexed->isDirectory) {
         try {
-          addCreatedPath(watcher, state, list, event.path, true);
+          addCreatedPath(watcher, state, list, event.path);
         } catch (const std::exception &error) {
           list.error(error.what());
         }
@@ -507,7 +557,7 @@ void processEvents(
           indexed->mtime,
           indexed->isDirectory
         );
-        list.create(event.path);
+        list.create(event.path, entryKind(indexed->isDirectory));
       }
     }
   }

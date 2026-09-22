@@ -50,8 +50,7 @@ test(
 function waitForEvents(queue, predicate = () => true, timeout = 5000) {
   if (queue.error) return Promise.reject(queue.error);
   return new Promise((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error('timed out waiting for events')), timeout);
-    queue.push({
+    const waiter = {
       events: [],
       predicate,
       resolve(events) {
@@ -62,7 +61,11 @@ function waitForEvents(queue, predicate = () => true, timeout = 5000) {
         clearTimeout(timer);
         reject(error);
       },
-    });
+    };
+    const timer = setTimeout(() => reject(new Error(
+      `timed out waiting for events: ${JSON.stringify(waiter.events)}`,
+    )), timeout);
+    queue.push(waiter);
   });
 }
 
@@ -138,6 +141,154 @@ function assertRename(events, oldPath, newPath) {
   assert.equal(typeof removed.renameId, 'string');
   assert.equal(created.renameId, removed.renameId);
 }
+
+function assertKind(events, type, eventPath, kind) {
+  const event = events.find(
+    (candidate) => candidate.type === type && candidate.path === eventPath,
+  );
+  assert.ok(event, `missing ${type} event for ${eventPath}`);
+  assert.equal(event.kind, kind);
+  return event;
+}
+
+test('pairs every descendant of a renamed directory with its entry kind',
+  {skip: !exactRenamePlatform}, async (t) => {
+    const directory = await fs.mkdtemp(path.join(
+      await fs.realpath(os.tmpdir()), 'native-watcher-tree-rename-',
+    ));
+    const oldRoot = path.join(directory, 'old');
+    const newRoot = path.join(directory, 'new');
+    const oldNested = path.join(oldRoot, 'nested');
+    const oldFile = path.join(oldNested, 'file.txt');
+    await fs.mkdir(oldNested, {recursive: true});
+    await fs.writeFile(oldFile, 'content');
+
+    const pending = [];
+    const subscription = await watcher.subscribe(directory, (error, events) => {
+      dispatchEvents(pending, error, events);
+    });
+    t.after(async () => {
+      await subscription.unsubscribe();
+      await fs.rm(directory, {recursive: true, force: true});
+    });
+
+    const barrier = path.join(directory, 'barrier.txt');
+    let eventsPromise = waitForEvents(pending, (events) =>
+      containsEvent(events, 'create', barrier),
+    );
+    await fs.writeFile(barrier, 'ready');
+    await eventsPromise;
+
+    const newNested = path.join(newRoot, 'nested');
+    const newFile = path.join(newNested, 'file.txt');
+    eventsPromise = waitForEvents(pending, (events) =>
+      [
+        [oldRoot, newRoot],
+        [oldNested, newNested],
+        [oldFile, newFile],
+      ].every(([oldPath, newPath]) => containsRename(events, oldPath, newPath)),
+    );
+    await fs.rename(oldRoot, newRoot);
+    const events = await eventsPromise;
+    const ids = new Set();
+    for (const [oldPath, newPath, kind] of [
+      [oldRoot, newRoot, 'directory'],
+      [oldNested, newNested, 'directory'],
+      [oldFile, newFile, 'file'],
+    ]) {
+      assertRename(events, oldPath, newPath);
+      const removed = assertKind(events, 'delete', oldPath, kind);
+      assertKind(events, 'create', newPath, kind);
+      ids.add(removed.renameId);
+    }
+    assert.equal(ids.size, 3, 'each entry needs its own rename id');
+  });
+
+test('reports typed descendant deletes when a directory leaves the root',
+  {skip: !exactRenamePlatform}, async (t) => {
+    const parent = await fs.mkdtemp(path.join(
+      await fs.realpath(os.tmpdir()), 'native-watcher-tree-move-out-',
+    ));
+    const directory = path.join(parent, 'watched');
+    const oldRoot = path.join(directory, 'old');
+    const oldNested = path.join(oldRoot, 'nested');
+    const oldFile = path.join(oldNested, 'file.txt');
+    const outside = path.join(parent, 'outside');
+    await fs.mkdir(oldNested, {recursive: true});
+    await fs.writeFile(oldFile, 'content');
+
+    const pending = [];
+    const subscription = await watcher.subscribe(directory, (error, events) => {
+      dispatchEvents(pending, error, events);
+    });
+    t.after(async () => {
+      await subscription.unsubscribe();
+      await fs.rm(parent, {recursive: true, force: true});
+    });
+
+    const barrier = path.join(directory, 'barrier.txt');
+    let eventsPromise = waitForEvents(pending, (events) =>
+      containsEvent(events, 'create', barrier),
+    );
+    await fs.writeFile(barrier, 'ready');
+    await eventsPromise;
+
+    eventsPromise = waitForEvents(pending, (events) =>
+      [oldRoot, oldNested, oldFile].every((entry) =>
+        containsEvent(events, 'delete', entry)),
+    );
+    await fs.rename(oldRoot, outside);
+    const events = await eventsPromise;
+    assertKind(events, 'delete', oldRoot, 'directory');
+    assertKind(events, 'delete', oldNested, 'directory');
+    assertKind(events, 'delete', oldFile, 'file');
+    assert.ok(events.every((event) => event.renameId === undefined));
+  });
+
+test('applies ignores to each descendant across a directory rename',
+  {skip: !exactRenamePlatform}, async (t) => {
+    const directory = await fs.mkdtemp(path.join(
+      await fs.realpath(os.tmpdir()), 'native-watcher-tree-ignore-',
+    ));
+    const oldRoot = path.join(directory, 'old');
+    const newRoot = path.join(directory, 'new');
+    const oldHidden = path.join(oldRoot, 'hidden.txt');
+    const oldVisible = path.join(oldRoot, 'visible.txt');
+    const newHidden = path.join(newRoot, 'hidden.txt');
+    const newVisible = path.join(newRoot, 'visible.txt');
+    await fs.mkdir(oldRoot);
+    await fs.writeFile(oldHidden, 'hidden');
+    await fs.writeFile(oldVisible, 'visible');
+
+    const pending = [];
+    const subscription = await watcher.subscribe(directory, (error, events) => {
+      dispatchEvents(pending, error, events);
+    }, {ignore: ['old/hidden.txt', 'new/visible.txt']});
+    t.after(async () => {
+      await subscription.unsubscribe();
+      await fs.rm(directory, {recursive: true, force: true});
+    });
+
+    const barrier = path.join(directory, 'barrier.txt');
+    let eventsPromise = waitForEvents(pending, (events) =>
+      containsEvent(events, 'create', barrier),
+    );
+    await fs.writeFile(barrier, 'ready');
+    await eventsPromise;
+
+    eventsPromise = waitForEvents(pending, (events) =>
+      containsRename(events, oldRoot, newRoot) &&
+      containsEvent(events, 'delete', oldVisible) &&
+      containsEvent(events, 'create', newHidden),
+    );
+    await fs.rename(oldRoot, newRoot);
+    const events = await eventsPromise;
+    assertRename(events, oldRoot, newRoot);
+    assert.equal(assertKind(events, 'delete', oldVisible, 'file').renameId, undefined);
+    assert.equal(assertKind(events, 'create', newHidden, 'file').renameId, undefined);
+    assert.ok(events.every((event) =>
+      event.path !== oldHidden && event.path !== newVisible));
+  });
 
 test('native subscription emits filesystem events', async (t) => {
   const tempDirectory = await fs.realpath(os.tmpdir());

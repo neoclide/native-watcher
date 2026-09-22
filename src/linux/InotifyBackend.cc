@@ -192,11 +192,16 @@ bool InotifyBackend::addCreatedTree(
 
     struct stat attributes;
     if (lstat(candidate.c_str(), &attributes) != 0) continue;
+    if (!S_ISREG(attributes.st_mode) && !S_ISDIR(attributes.st_mode)) {
+      continue;
+    }
     bool isDirectory = S_ISDIR(attributes.st_mode);
     bool existed = tree->find(candidate) != nullptr;
     if (!existed) {
       tree->add(candidate, CONVERT_TIME(attributes.st_mtim), isDirectory);
-      if (reportEvents) watcher->mEvents.create(candidate);
+      if (reportEvents) {
+        watcher->mEvents.create(candidate, entryKind(isDirectory));
+      }
     }
 
     if (isDirectory &&
@@ -237,16 +242,16 @@ bool InotifyBackend::reconcileMovedTree(
     if (!isPathOrDescendant(current.first, path)) continue;
     auto old = before.find(current.first);
     if (old == before.end()) {
-      watcher->mEvents.create(current.first);
+      watcher->mEvents.create(current.first, entryKind(current.second.isDir));
     } else {
       if (old->second.isDir != current.second.isDir) {
         if (old->second.isDir) {
           removeSubscriptions(watcher.get(), old->first);
         }
-        watcher->mEvents.update(current.first);
+        watcher->mEvents.update(current.first, entryKind(current.second.isDir));
       } else if (!current.second.isDir &&
           old->second.mtime != current.second.mtime) {
-        watcher->mEvents.update(current.first);
+        watcher->mEvents.update(current.first, EntryKind::File);
       }
       before.erase(old);
     }
@@ -254,7 +259,7 @@ bool InotifyBackend::reconcileMovedTree(
 
   for (const auto &old : before) {
     if (!watcher->isIgnored(old.first)) {
-      watcher->mEvents.remove(old.first);
+      watcher->mEvents.remove(old.first, entryKind(old.second.isDir));
     }
     if (old.second.isDir) {
       removeSubscriptions(watcher.get(), old.first);
@@ -343,8 +348,10 @@ void InotifyBackend::flushExpiredMoves() {
     // A new entry may have reused this path while the old move was waiting
     // for its pair. Do not report the old entry's removal as a deletion of
     // the new one; its create event already describes the current path.
-    if (move.tree->find(move.path) == nullptr) {
-      move.watcher->mEvents.remove(move.path);
+    for (const auto &entry : move.entries) {
+      if (move.tree->find(entry.path) == nullptr) {
+        move.watcher->mEvents.remove(entry.path, entryKind(entry.isDir));
+      }
     }
     if (move.isDirectory) {
       removeSubscriptions(move);
@@ -477,18 +484,24 @@ bool InotifyBackend::handleSubscription(struct inotify_event *event, std::shared
       move = &pending->second;
       suppressedEvents = move->suppressedEvents;
       bool targetExisted = sub->tree->find(path) != nullptr;
-      if (targetExisted) {
-        watcher->mEvents.remove(oldPath);
-        watcher->mEvents.create(path);
-      } else {
-        watcher->mEvents.rename(
-          oldPath,
-          path,
-          "inotify:" + std::to_string(event->cookie)
-        );
+      for (const auto &entry : move->entries) {
+        std::string newEntryPath = path + entry.path.substr(oldPath.size());
+        EntryKind kind = entryKind(entry.isDir);
+        if (targetExisted || watcher->isIgnored(newEntryPath)) {
+          watcher->mEvents.remove(entry.path, kind);
+          if (!watcher->isIgnored(newEntryPath)) {
+            watcher->mEvents.create(newEntryPath, kind);
+          }
+        } else {
+          watcher->mEvents.rename(
+            entry.path,
+            newEntryPath,
+            "inotify:" + std::to_string(event->cookie) +
+              ":" + entry.path.substr(oldPath.size()),
+            kind
+          );
+        }
       }
-    } else {
-      watcher->mEvents.create(path);
     }
 
     if (isMoveWithinRoot) {
@@ -506,6 +519,19 @@ bool InotifyBackend::handleSubscription(struct inotify_event *event, std::shared
     // https://github.com/parcel-bundler/watcher/issues/76
     if (lstat(path.c_str(), &st) != 0) {
       return false;
+    }
+    if (!S_ISREG(st.st_mode) && !S_ISDIR(st.st_mode)) {
+      return false;
+    }
+    if (!isMoveWithinRoot) {
+      watcher->mEvents.create(path, entryKind(S_ISDIR(st.st_mode)));
+    } else if (missingSource) {
+      watcher->mEvents.rename(
+        oldPath,
+        path,
+        "inotify:" + std::to_string(event->cookie),
+        entryKind(S_ISDIR(st.st_mode))
+      );
     }
     DirEntry *entry;
     if (isMoveWithinRoot) {
@@ -527,9 +553,9 @@ bool InotifyBackend::handleSubscription(struct inotify_event *event, std::shared
       );
       bool success = (isMoveWithinRoot && !missingSource) ||
         watchDir(watcher, path, sub->tree);
-      if (success && suppressedEvents) {
+      if (success && (suppressedEvents || rescanMovedTree)) {
         success = reconcileMovedTree(watcher, path, sub->tree);
-      } else if (success && (!isMoveWithinRoot || rescanMovedTree)) {
+      } else if (success && !isMoveWithinRoot) {
         success = addCreatedTree(watcher, path, sub->tree);
       }
       if (!success) {
@@ -551,12 +577,13 @@ bool InotifyBackend::handleSubscription(struct inotify_event *event, std::shared
       }
     }
   } else if (event->mask & (IN_MODIFY | IN_ATTRIB)) {
-    watcher->mEvents.update(path);
-
     struct stat st;
-    if (stat(path.c_str(), &st) != 0) {
+    if (lstat(path.c_str(), &st) != 0 ||
+        (!S_ISREG(st.st_mode) && !S_ISDIR(st.st_mode))) {
       return false;
     }
+    if (sub->tree->find(path) == nullptr) return false;
+    watcher->mEvents.update(path, entryKind(S_ISDIR(st.st_mode)));
     sub->tree->update(path, CONVERT_TIME(st.st_mtim));
   } else if (event->mask & (IN_DELETE | IN_DELETE_SELF | IN_MOVED_FROM | IN_MOVE_SELF)) {
     bool isSelfEvent = (event->mask & (IN_DELETE_SELF | IN_MOVE_SELF));
@@ -591,8 +618,9 @@ bool InotifyBackend::handleSubscription(struct inotify_event *event, std::shared
         }
       );
     } else {
-      watcher->mEvents.remove(path);
-      sub->tree->remove(path);
+      for (const auto &entry : sub->tree->extract(path)) {
+        watcher->mEvents.remove(entry.path, entryKind(entry.isDir));
+      }
       if (isSelfEvent || isDir) {
         if (isSelfEvent && path == watcher->mDir) invalidate(watcher);
         removeSubscriptions(watcher.get(), path);

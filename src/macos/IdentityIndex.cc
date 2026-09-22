@@ -182,7 +182,9 @@ void IdentityIndex::rename(
 
 std::optional<IndexedPath> readIndexedPath(const std::string &path) {
   struct stat file;
-  if (lstat(path.c_str(), &file) != 0 || !pathHasExactCase(path)) {
+  if (lstat(path.c_str(), &file) != 0 ||
+      (!S_ISREG(file.st_mode) && !S_ISDIR(file.st_mode)) ||
+      !pathHasExactCase(path)) {
     return std::nullopt;
   }
   return fromStat(file);
@@ -219,7 +221,9 @@ IdentityIndex scanIdentityIndex(
       continue;
     }
 
-    if (node->fts_statp == nullptr) continue;
+    if (node->fts_statp == nullptr ||
+        (!S_ISREG(node->fts_statp->st_mode) &&
+         !S_ISDIR(node->fts_statp->st_mode))) continue;
     IndexedPath entry = fromStat(*node->fts_statp);
     result.add(path, entry);
     onEntry(path, entry);

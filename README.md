@@ -67,7 +67,7 @@ const subscription = await watcher.subscribe(
     }
 
     for (const event of events) {
-      console.log(event.type, event.path, event.renameId);
+      console.log(event.type, event.kind, event.path, event.renameId);
     }
   },
   {
@@ -106,6 +106,7 @@ Each event has this shape:
 ```ts
 type WatchEvent = {
   type: 'create' | 'update' | 'delete';
+  kind: 'file' | 'directory';
   path: string;       // absolute path
   renameId?: string;  // opaque correlation id
 };
@@ -116,10 +117,19 @@ ordering or on seeing every intermediate filesystem operation. For example, a
 rapid create followed by updates can be delivered as one `create`, and a rapid
 update followed by deletion can be delivered as one `delete`.
 
+`kind` is included on every event, including `delete` after the path no longer
+exists. Only regular files and directories are reported. Symlinks, junctions,
+FIFOs, and other special entries are skipped and are not traversed. Consumers
+that need file-only notifications can filter for `kind === 'file'`.
+
 Moving a populated directory into the watched tree reports `create` for the
 directory and all existing descendants. The addon also starts watching every
 new subdirectory; on macOS the full subtree is added to the identity index so an
 immediate rename of an existing child can be correlated.
+Deleting or moving a directory out reports `delete` for every indexed file and
+directory below it. Renaming a directory within the watched tree reports a
+delete/create pair for each visible descendant, with a separate `renameId` for
+each pair. Ignore rules are applied to both old and new paths.
 
 ### Rename correlation
 
@@ -129,8 +139,8 @@ the same opaque `renameId`:
 
 ```js
 [
-  {type: 'delete', path: '/work/old.txt', renameId: 'inotify:1234'},
-  {type: 'create', path: '/work/new.txt', renameId: 'inotify:1234'},
+  {type: 'delete', kind: 'file', path: '/work/old.txt', renameId: 'opaque-id'},
+  {type: 'create', kind: 'file', path: '/work/new.txt', renameId: 'opaque-id'},
 ]
 ```
 
