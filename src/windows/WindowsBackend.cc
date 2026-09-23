@@ -312,6 +312,28 @@ public:
 
   void processEvent(PFILE_NOTIFY_INFORMATION info) {
     std::string path = mWatcher->mDir + "\\" + utf16ToUtf8(info->FileName, info->FileNameLength / sizeof(WCHAR));
+    // ReadDirectoryChangesW may keep the old casing of an ancestor after a
+    // case-only directory rename. Preserve indexed historical paths (needed
+    // for queued renames/deletes), but resolve unknown parents on disk before
+    // looking up descendants in the case-sensitive tree.
+    if (mTree->find(path) == nullptr) {
+      std::string resolved = mWatcher->mDir;
+      size_t start = resolved.size() + 1;
+      size_t end = path.find('\\', start);
+      while (end != std::string::npos) {
+        WIN32_FIND_DATAW data;
+        std::string parent = resolved + "\\" + path.substr(start, end - start);
+        HANDLE search = FindFirstFileW(utf8ToUtf16(parent).c_str(), &data);
+        if (search == INVALID_HANDLE_VALUE) break;
+        FindClose(search);
+        resolved += "\\" + utf16ToUtf8(
+          data.cFileName, static_cast<DWORD>(wcslen(data.cFileName))
+        );
+        start = end + 1;
+        end = path.find('\\', start);
+      }
+      if (end == std::string::npos) path = resolved + "\\" + path.substr(start);
+    }
     if (mWatcher->isIgnored(path)) {
       flushPendingRename();
       return;
