@@ -10,7 +10,7 @@ The package supports Linux, macOS, and Windows. It exposes one API: `subscribe`.
 
 ## Install and build
 
-Node.js 22.20 or newer and a C++17 toolchain are required. Installing from a source
+Node.js 20 or newer and a C++17 toolchain are required. Installing from a source
 checkout builds the addon with `node-gyp`:
 
 ```sh
