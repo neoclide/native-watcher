@@ -2,7 +2,9 @@
 #define FS_EVENTS_H
 
 #include <CoreServices/CoreServices.h>
+#include <dispatch/dispatch.h>
 #include "../Backend.hh"
+#include "../Signal.hh"
 
 class FSEventsBackend : public Backend {
 public:
@@ -11,10 +13,11 @@ public:
   void subscribe(WatcherRef watcher) override;
   void unsubscribe(WatcherRef watcher) override;
   void cleanupAfterError() override;
+  void handleBackendError(std::exception &err);
 private:
   void startStream(WatcherRef watcher, FSEventStreamEventId id);
-  CFRunLoopRef mRunLoop = nullptr;
-  CFRunLoopSourceRef mKeepAliveSource = nullptr;
+  dispatch_queue_t mQueue = nullptr;
+  Signal mStoppedSignal;
 };
 
 #endif

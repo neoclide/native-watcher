@@ -16,25 +16,21 @@
 #define CONVERT_TIME(ts) ((uint64_t)ts.tv_sec * 1000000000 + ts.tv_nsec)
 #define IGNORED_FLAGS (kFSEventStreamEventFlagItemIsHardlink | kFSEventStreamEventFlagItemIsLastHardlink | kFSEventStreamEventFlagItemIsSymlink | kFSEventStreamEventFlagItemIsDir | kFSEventStreamEventFlagItemIsFile)
 
-void stopStream(FSEventStreamRef stream, CFRunLoopRef runLoop) {
+void stopStream(FSEventStreamRef stream) {
+  if (stream == nullptr) {
+    return;
+  }
   FSEventStreamStop(stream);
-  FSEventStreamUnscheduleFromRunLoop(stream, runLoop, kCFRunLoopDefaultMode);
   FSEventStreamInvalidate(stream);
   FSEventStreamRelease(stream);
 }
 
 void flushStreamCallbacks(
   FSEventStreamRef stream,
-  CFRunLoopRef runLoop
+  dispatch_queue_t queue
 ) {
   FSEventStreamFlushSync(stream);
-  Signal barrier;
-  Signal *barrierPointer = &barrier;
-  CFRunLoopPerformBlock(runLoop, kCFRunLoopDefaultMode, ^ {
-    barrierPointer->notify();
-  });
-  CFRunLoopWakeUp(runLoop);
-  barrier.wait();
+  dispatch_sync(queue, ^ {});
 }
 
 struct WatcherContext {
@@ -565,7 +561,7 @@ void processEvents(
   watcher->notify();
   if (deletedRoot) {
     watcher->mNeedsResubscribe = true;
-    stopStream((FSEventStreamRef)streamRef, CFRunLoopGetCurrent());
+    stopStream((FSEventStreamRef)streamRef);
     watcher->state = nullptr;
   }
 }
@@ -583,27 +579,34 @@ void FSEventsCallback(
   WatcherRef &watcher = context->watcher;
   if (watcher->state == nullptr) return;
 
-  std::vector<PendingEvent> events;
-  events.reserve(numEvents);
-  for (size_t i = 0; i < numEvents; ++i) {
-    events.push_back(PendingEvent {paths[i], eventFlags[i], eventIds[i]});
-  }
-
   auto stateGuard = watcher->state;
   auto *state = static_cast<State *>(stateGuard.get());
-  {
-    std::lock_guard<std::mutex> lock(state->initializationMutex);
-    if (state->initializing) {
-      state->pendingEvents.insert(
-        state->pendingEvents.end(),
-        events.begin(),
-        events.end()
-      );
-      return;
+
+  try {
+    std::vector<PendingEvent> events;
+    events.reserve(numEvents);
+    for (size_t i = 0; i < numEvents; ++i) {
+      events.push_back(PendingEvent {paths[i], eventFlags[i], eventIds[i]});
+    }
+
+    {
+      std::lock_guard<std::mutex> lock(state->initializationMutex);
+      if (state->initializing) {
+        state->pendingEvents.insert(
+          state->pendingEvents.end(),
+          events.begin(),
+          events.end()
+        );
+        return;
+      }
+    }
+
+    processEvents(streamRef, watcher, events);
+  } catch (std::exception &err) {
+    if (state != nullptr && state->backend != nullptr) {
+      state->backend->handleBackendError(err);
     }
   }
-
-  processEvents(streamRef, watcher, events);
 }
 
 void checkWatcher(WatcherRef watcher) {
@@ -682,7 +685,7 @@ void FSEventsBackend::startStream(WatcherRef watcher, FSEventStreamEventId id) {
   FSEventStreamSetExclusionPaths(stream, exclusions);
   CFRelease(exclusions);
 
-  FSEventStreamScheduleWithRunLoop(stream, mRunLoop, kCFRunLoopDefaultMode);
+  FSEventStreamSetDispatchQueue(stream, mQueue);
   state->stream = stream;
   bool started = FSEventStreamStart(stream);
 
@@ -690,11 +693,6 @@ void FSEventsBackend::startStream(WatcherRef watcher, FSEventStreamEventId id) {
   CFRelease(fileWatchPath);
 
   if (!started) {
-    FSEventStreamUnscheduleFromRunLoop(
-      stream,
-      mRunLoop,
-      kCFRunLoopDefaultMode
-    );
     FSEventStreamInvalidate(stream);
     FSEventStreamRelease(stream);
     state->stream = nullptr;
@@ -721,7 +719,7 @@ void FSEventsBackend::startStream(WatcherRef watcher, FSEventStreamEventId id) {
   // against the current filesystem until a scan completes without receiving
   // another event batch.
   while (watcher->state != nullptr) {
-    flushStreamCallbacks(stream, mRunLoop);
+    flushStreamCallbacks(stream, mQueue);
     {
       std::lock_guard<std::mutex> lock(state->initializationMutex);
       if (state->pendingEvents.empty()) {
@@ -736,28 +734,18 @@ void FSEventsBackend::startStream(WatcherRef watcher, FSEventStreamEventId id) {
 }
 
 void FSEventsBackend::start() {
-  mRunLoop = CFRunLoopGetCurrent();
-  CFRetain(mRunLoop);
-  CFRunLoopSourceContext context = {};
-  context.perform = [](void *) {};
-  mKeepAliveSource = CFRunLoopSourceCreate(nullptr, 0, &context);
-  CFRunLoopAddSource(mRunLoop, mKeepAliveSource, kCFRunLoopDefaultMode);
-
-  // Unlock once run loop has started.
-  CFRunLoopPerformBlock(mRunLoop, kCFRunLoopDefaultMode, ^ {
-    notifyStarted();
-  });
-
-  CFRunLoopWakeUp(mRunLoop);
-  CFRunLoopRun();
+  mQueue = dispatch_queue_create("native-watcher.fsevents", DISPATCH_QUEUE_SERIAL);
+  notifyStarted();
+  mStoppedSignal.wait();
 }
 
 FSEventsBackend::~FSEventsBackend() {
   std::unique_lock<std::mutex> lock(mMutex);
-  CFRunLoopStop(mRunLoop);
-  CFRunLoopSourceInvalidate(mKeepAliveSource);
-  CFRelease(mKeepAliveSource);
-  CFRelease(mRunLoop);
+  mStoppedSignal.notify();
+  if (mQueue != nullptr) {
+    dispatch_release(mQueue);
+    mQueue = nullptr;
+  }
 }
 
 // Backend::handleError holds mMutex while retiring the failed backend.
@@ -766,6 +754,12 @@ void FSEventsBackend::cleanupAfterError() {
     auto state = std::static_pointer_cast<State>(watcher->state);
     if (state != nullptr && state->backend == this) unsubscribe(watcher);
   }
+}
+
+void FSEventsBackend::handleBackendError(std::exception &err) {
+  auto self = shared_from_this();
+  handleError(err);
+  mStoppedSignal.notify();
 }
 
 // This function is called by Backend::watch which takes a lock on mMutex
@@ -777,7 +771,7 @@ void FSEventsBackend::subscribe(WatcherRef watcher) {
     startStream(watcher, kFSEventStreamEventIdSinceNow);
   } catch (...) {
     if (s->stream != nullptr) {
-      stopStream(s->stream, mRunLoop);
+      stopStream(s->stream);
       s->stream = nullptr;
     }
     watcher->state = nullptr;
@@ -790,7 +784,7 @@ void FSEventsBackend::unsubscribe(WatcherRef watcher) {
   auto stateGuard = watcher->state;
   State* s = static_cast<State*>(stateGuard.get());
   if (s != nullptr) {
-    stopStream(s->stream, mRunLoop);
+    stopStream(s->stream);
     watcher->state = nullptr;
   }
 }

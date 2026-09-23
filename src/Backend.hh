@@ -32,6 +32,7 @@ public:
   std::thread mThread;
 protected:
   std::unordered_set<WatcherRef> mSubscriptions;
+  void handleError(std::exception &err);
 private:
   std::unordered_set<WatcherRef> mInvalidSubscriptions;
   std::atomic<size_t> mSharedReservations {0};
@@ -40,7 +41,6 @@ private:
   bool mStartupComplete = false;
   std::string mStartupError;
 
-  void handleError(std::exception &err);
   void notifyStartupFailed(const std::string &error);
 };
 
