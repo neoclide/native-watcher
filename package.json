@@ -16,7 +16,7 @@
     "build": "node-gyp rebuild",
     "benchmark:subscribe": "node --expose-gc benchmark/subscribe.js",
     "install": "node-gyp rebuild",
-    "test": "node --test test/*.test.js",
+    "test": "node scripts/test.cjs",
     "test:rename": "node --test test/rename.test.js"
   },
   "engines": {

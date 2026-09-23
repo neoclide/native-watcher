@@ -112,6 +112,32 @@ void removeIndexedPath(State *state, EventList &events, const std::string &path)
   state->tree->remove(path);
 }
 
+void recordCreatedPath(
+  State *state,
+  EventList &events,
+  const std::string &path,
+  const IndexedPath &entry
+) {
+  const IndexedPath *previous = state->identities.find(path);
+  bool sameIdentity = previous != nullptr &&
+    previous->identity == entry.identity &&
+    previous->isDirectory == entry.isDirectory;
+  bool modified = sameIdentity && !entry.isDirectory &&
+    previous->mtime != entry.mtime;
+  state->identities.add(path, entry);
+  if (!sameIdentity) state->tree->remove(path);
+  if (state->tree->update(path, entry.mtime) == nullptr) {
+    state->tree->add(path, entry.mtime, entry.isDirectory);
+  }
+  // Created flags can recur after the first create was delivered. Classify
+  // against the index so a subsequent write is not emitted as another create.
+  if (!sameIdentity) {
+    events.create(path, entryKind(entry.isDirectory));
+  } else if (modified) {
+    events.update(path, EntryKind::File);
+  }
+}
+
 void addCreatedPath(
   WatcherRef watcher,
   State *state,
@@ -124,9 +150,7 @@ void addCreatedPath(
   }
 
   if (!entry->isDirectory) {
-    state->identities.add(path, *entry);
-    state->tree->add(path, entry->mtime, false);
-    events.create(path, EntryKind::File);
+    recordCreatedPath(state, events, path, *entry);
     return;
   }
 
@@ -142,13 +166,7 @@ void addCreatedPath(
       const std::string &candidate,
       const IndexedPath &candidateEntry
     ) {
-      state->identities.add(candidate, candidateEntry);
-      state->tree->add(
-        candidate,
-        candidateEntry.mtime,
-        candidateEntry.isDirectory
-      );
-      events.create(candidate, entryKind(candidateEntry.isDirectory));
+      recordCreatedPath(state, events, candidate, candidateEntry);
     }
   );
 }
@@ -537,8 +555,8 @@ void processEvents(
         continue;
       }
 
-      state->identities.add(event.path, *indexed);
-      if (isModified && entry) {
+      if ((isModified || sameIdentity) && entry) {
+        state->identities.add(event.path, *indexed);
         state->tree->update(event.path, indexed->mtime);
         list.update(event.path, entryKind(indexed->isDirectory));
       } else if (!sameIdentity && indexed->isDirectory) {
@@ -548,6 +566,7 @@ void processEvents(
           list.error(error.what());
         }
       } else {
+        state->identities.add(event.path, *indexed);
         state->tree->add(
           event.path,
           indexed->mtime,
