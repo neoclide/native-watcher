@@ -466,6 +466,7 @@ test('does not follow a directory link created after subscription', async () => 
   const outside = path.join(parent, 'outside');
   const outsideFile = path.join(outside, 'external.txt');
   const link = path.join(directory, 'external-link');
+  const stagedLink = path.join(parent, 'staged-link');
   const linkedFile = path.join(link, 'external.txt');
   await fs.mkdir(directory);
   await fs.mkdir(outside);
@@ -475,11 +476,15 @@ test('does not follow a directory link created after subscription', async () => 
   const subscription = await watcher.subscribe(directory, collector.callback);
   try {
     let mark = collector.mark();
+    // Windows creates a junction as a normal directory before setting its
+    // reparse point. Publish the completed link so that the test does not
+    // reject legitimate events from that intermediate directory.
     await fs.symlink(
       outside,
-      link,
+      stagedLink,
       process.platform === 'win32' ? 'junction' : 'dir',
     );
+    await fs.rename(stagedLink, link);
     const marker = path.join(directory, 'delivery-marker');
     const observed = collector.waitFor('create', marker, mark);
     await fs.appendFile(outsideFile, 'after');

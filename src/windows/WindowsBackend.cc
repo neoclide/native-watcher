@@ -406,11 +406,29 @@ public:
         }
         break;
       }
-      case FILE_ACTION_REMOVED:
+      case FILE_ACTION_REMOVED: {
         flushPendingRename();
         mRemovedPaths.insert(path);
         removePath(path);
+        // NTFS can report a case-only rename as a removal without a new-name
+        // notification. Recover the on-disk spelling and rebuild descendants.
+        WIN32_FIND_DATAW data;
+        HANDLE search = FindFirstFileW(utf8ToUtf16(path).c_str(), &data);
+        if (search != INVALID_HANDLE_VALUE) {
+          FindClose(search);
+          size_t separator = path.find_last_of('\\');
+          std::string name = utf16ToUtf8(
+            data.cFileName, static_cast<DWORD>(wcslen(data.cFileName))
+          );
+          auto oldName = utf8ToUtf16(path.substr(separator + 1));
+          if (name != path.substr(separator + 1) &&
+              CompareStringOrdinal(oldName.c_str(), -1, data.cFileName, -1,
+                                   TRUE) == CSTR_EQUAL) {
+            addPath(path.substr(0, separator + 1) + name);
+          }
+        }
         break;
+      }
       case FILE_ACTION_RENAMED_OLD_NAME:
         flushPendingRename();
         mPendingRenamePath = path;
