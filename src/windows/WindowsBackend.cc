@@ -312,31 +312,6 @@ public:
 
   void processEvent(PFILE_NOTIFY_INFORMATION info) {
     std::string path = mWatcher->mDir + "\\" + utf16ToUtf8(info->FileName, info->FileNameLength / sizeof(WCHAR));
-    // ReadDirectoryChangesW may keep the old casing of an ancestor after a
-    // case-only directory rename. Preserve indexed historical paths (needed
-    // for queued renames/deletes), but resolve unknown parents on disk before
-    // looking up descendants in the case-sensitive tree.
-    if (mTree->find(path) == nullptr) {
-      std::string resolved = mWatcher->mDir;
-      size_t start = resolved.size() + 1;
-      size_t end = path.find('\\', start);
-      while (end != std::string::npos) {
-        WIN32_FIND_DATAW data;
-        std::string parent = resolved + "\\" + path.substr(start, end - start);
-        HANDLE search = FindFirstFileW(utf8ToUtf16(parent).c_str(), &data);
-        if (search == INVALID_HANDLE_VALUE) break;
-        FindClose(search);
-        resolved += "\\" + utf16ToUtf8(
-          data.cFileName, static_cast<DWORD>(wcslen(data.cFileName))
-        );
-        start = end + 1;
-        end = path.find('\\', start);
-      }
-      if (end == std::string::npos) path = resolved + "\\" + path.substr(start);
-    }
-    if (mWatcher->mDir.find("native-watcher-dir-case-") != std::string::npos) {
-      fprintf(stderr, "CASE action=%lu path=%s indexed=%d\n", info->Action, path.c_str(), mTree->find(path) != nullptr);
-    }
     if (mWatcher->isIgnored(path)) {
       flushPendingRename();
       return;
@@ -405,9 +380,11 @@ public:
               data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY
             );
           }
+          // A preceding removal may already have consumed the source tree.
+          // Rebuild all descendants after clearing the apparent target above.
           if (hasAttributes && supported &&
               (data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) &&
-              (!mWatcher->mIgnorePaths.empty() ||
+              (moved.empty() || !mWatcher->mIgnorePaths.empty() ||
                !mWatcher->mIgnoreGlobs.empty())) {
             addPath(path);
           }
@@ -435,8 +412,8 @@ public:
         flushPendingRename();
         mRemovedPaths.insert(path);
         removePath(path);
-        // NTFS can report a case-only rename as a removal without a new-name
-        // notification. Recover the on-disk spelling and rebuild descendants.
+        // NTFS can report a removal before the case-only rename pair. Recover
+        // the on-disk spelling, including when no paired notification follows.
         WIN32_FIND_DATAW data;
         HANDLE search = FindFirstFileW(utf8ToUtf16(path).c_str(), &data);
         if (search != INVALID_HANDLE_VALUE) {
