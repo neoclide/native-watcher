@@ -334,6 +334,9 @@ public:
       }
       if (end == std::string::npos) path = resolved + "\\" + path.substr(start);
     }
+    if (mWatcher->mDir.find("native-watcher-dir-case-") != std::string::npos) {
+      fprintf(stderr, "CASE action=%lu path=%s indexed=%d\n", info->Action, path.c_str(), mTree->find(path) != nullptr);
+    }
     if (mWatcher->isIgnored(path)) {
       flushPendingRename();
       return;
