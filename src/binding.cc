@@ -44,7 +44,7 @@ bool getIgnoreGlobs(
           auto key = item.As<String>().Utf8Value();
           try {
             result.emplace(key);
-          } catch (const std::exception& e) {
+          } catch (const std::regex_error& e) {
             error = e.what();
             return false;
           }
