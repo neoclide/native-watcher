@@ -235,9 +235,22 @@ Value queueSubscriptionWork(const CallbackInfo& info) {
       std::move(ignoreGlobs),
       backend
     );
+  } catch (const std::exception &e) {
+    backend->releaseShared();
+    bool isPending = false;
+    napi_is_exception_pending(env, &isPending);
+    if (!isPending) {
+      Error::New(env, e.what()).ThrowAsJavaScriptException();
+    }
+    return env.Null();
   } catch (...) {
     backend->releaseShared();
-    throw;
+    bool isPending = false;
+    napi_is_exception_pending(env, &isPending);
+    if (!isPending) {
+      Error::New(env, "Failed to initialize runner").ThrowAsJavaScriptException();
+    }
+    return env.Null();
   }
   return runner->queue();
 }

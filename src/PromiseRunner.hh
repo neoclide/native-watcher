@@ -1,6 +1,7 @@
 #ifndef PROMISE_RUNNER_H
 #define PROMISE_RUNNER_H
 
+#include <stdexcept>
 #include <node_api.h>
 #include <napi.h>
 
@@ -18,15 +19,18 @@ public:
       work = nullptr;
       const napi_extended_error_info *error_info = 0;
       napi_get_last_error_info(env, &error_info);
-      if (error_info->error_message) {
-        Error::New(env, error_info->error_message).ThrowAsJavaScriptException();
-      } else {
-        Error::New(env).ThrowAsJavaScriptException();
-      }
+      std::string message = error_info && error_info->error_message ? error_info->error_message : "Failed to create async work";
+      Error::New(env, message).ThrowAsJavaScriptException();
+      throw std::runtime_error(message);
     }
   }
 
-  virtual ~PromiseRunner() {}
+  virtual ~PromiseRunner() {
+    if (work) {
+      napi_delete_async_work(env, work);
+      work = nullptr;
+    }
+  }
 
   Value queue() {
     if (work) {
@@ -59,6 +63,7 @@ private:
       if (status == napi_ok) {
         status = napi_delete_async_work(self->env, self->work);
         if (status == napi_ok) {
+          self->work = nullptr;
           if (self->error.size() == 0) {
             self->onOK();
           } else {
@@ -71,6 +76,10 @@ private:
     }
 
     // fallthrough for error handling
+    if (self->work) {
+      napi_delete_async_work(self->env, self->work);
+      self->work = nullptr;
+    }
     const napi_extended_error_info *error_info = 0;
     napi_get_last_error_info(env, &error_info);
     if (error_info->error_message){
