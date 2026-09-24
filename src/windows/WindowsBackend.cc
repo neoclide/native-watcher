@@ -218,6 +218,12 @@ public:
     );
 
     if (!success) {
+      if (GetLastError() == ERROR_INVALID_PARAMETER && mWriteBuffer.size() > NETWORK_BUF_SIZE) {
+        mReadBuffer.resize(NETWORK_BUF_SIZE);
+        mWriteBuffer.resize(NETWORK_BUF_SIZE);
+        poll();
+        return;
+      }
       throw WatcherError("Failed to read changes", mWatcher);
     }
     mPollPending = true;
