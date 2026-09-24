@@ -1,6 +1,7 @@
 #ifndef SIGNAL_H
 #define SIGNAL_H
 
+#include <atomic>
 #include <mutex>
 #include <condition_variable>
 
@@ -34,12 +35,13 @@ public:
   }
   
   bool isWaiting() {
-    return mWaiting;
+    std::unique_lock<std::mutex> lock(mMutex);
+    return mWaiting.load();
   }
 
 private:
   bool mFlag;
-  bool mWaiting;
+  std::atomic<bool> mWaiting;
   std::mutex mMutex;
   std::condition_variable mCond;
 };
