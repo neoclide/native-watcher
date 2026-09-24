@@ -5,13 +5,14 @@
 // https://stackoverflow.com/a/17713799
 // https://laristra.github.io/flecsi/src/developer-guide/patterns/meyers_singleton.html
 static std::mutex& mDirCacheMutex() {
-   static std::mutex mutex;
-   return mutex;
+  static std::mutex* mutex = new std::mutex();
+  return *mutex;
 }
 
 static std::unordered_map<std::string, std::weak_ptr<DirTree>>& dirTreeCache() {
-   static std::unordered_map<std::string, std::weak_ptr<DirTree>> cache;
-   return cache;
+  static std::unordered_map<std::string, std::weak_ptr<DirTree>>* cache =
+    new std::unordered_map<std::string, std::weak_ptr<DirTree>>();
+  return *cache;
 }
 
 struct DirTreeDeleter {
