@@ -75,7 +75,7 @@ struct PendingEvent {
 
 class State: public WatcherState {
 public:
-  FSEventsBackend *backend = nullptr;
+  std::weak_ptr<FSEventsBackend> backend;
   std::atomic<FSEventStreamRef> stream {nullptr};
   dispatch_queue_t callbackQueue = nullptr;
   std::shared_ptr<DirTree> tree;
@@ -636,8 +636,11 @@ void FSEventsCallback(
 
     processEvents(streamRef, watcher, events);
   } catch (std::exception &err) {
-    if (state != nullptr && state->backend != nullptr) {
-      state->backend->handleBackendError(err);
+    if (state != nullptr) {
+      auto backend = state->backend.lock();
+      if (backend != nullptr) {
+        backend->handleBackendError(err);
+      }
     }
   }
 }
@@ -794,7 +797,7 @@ FSEventsBackend::~FSEventsBackend() {
 void FSEventsBackend::cleanupAfterError() {
   for (const auto &watcher : mSubscriptions) {
     auto state = std::static_pointer_cast<State>(watcher->state);
-    if (state != nullptr && state->backend == this) unsubscribe(watcher);
+    if (state != nullptr && state->backend.lock().get() == this) unsubscribe(watcher);
   }
 }
 
@@ -807,7 +810,7 @@ void FSEventsBackend::handleBackendError(std::exception &err) {
 // This function is called by Backend::watch which takes a lock on mMutex
 void FSEventsBackend::subscribe(WatcherRef watcher) {
   auto s = std::make_shared<State>();
-  s->backend = this;
+  s->backend = std::static_pointer_cast<FSEventsBackend>(shared_from_this());
   s->callbackQueue = mQueue;
   watcher->state = s;
   try {
