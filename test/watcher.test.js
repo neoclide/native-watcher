@@ -39,6 +39,35 @@ test('reports create, update, and delete for a file', async (t) => {
   assert.equal((await deleted).find((event) => event.path === file).kind, 'file');
 });
 
+test('reports an atomic replacement of an existing file as update on macOS',
+  {skip: process.platform !== 'darwin'}, async (t) => {
+    let target;
+    const {directory, collector} = await createFixture(t, undefined, async (root) => {
+      target = path.join(root, 'file.txt');
+      await fs.writeFile(target, 'before');
+    });
+
+    const barrier = path.join(directory, 'barrier.txt');
+    let waiting = collector.waitFor('create', barrier);
+    await fs.writeFile(barrier, 'ready');
+    await waiting;
+
+    const temporary = path.join(directory, 'file.txt.tmp');
+    waiting = collector.waitFor('create', temporary);
+    await fs.writeFile(temporary, 'after');
+    await waiting;
+
+    const mark = collector.mark();
+    waiting = collector.waitFrom(mark, (events) =>
+      events.some((event) => event.path === target));
+    await fs.rename(temporary, target);
+    const events = await waiting;
+    assertEvent(events, 'update', target);
+    assert.ok(!events.some((event) =>
+      event.path === target && event.type === 'create'),
+    `replacement reported as create: ${JSON.stringify(events)}`);
+  });
+
 test('rapid file changes do not leave a stale final event state', async (t) => {
   const {directory, collector} = await createFixture(t);
   const ephemeral = path.join(directory, 'ephemeral.txt');

@@ -136,6 +136,8 @@ void recordCreatedPath(
     previous->isDirectory == entry.isDirectory;
   bool modified = sameIdentity && !entry.isDirectory &&
     previous->mtime != entry.mtime;
+  bool replacedFile = previous != nullptr && !previous->isDirectory &&
+    !entry.isDirectory && !sameIdentity;
   bool typeChanged = previous != nullptr &&
     previous->isDirectory != entry.isDirectory;
   if (typeChanged) {
@@ -149,10 +151,10 @@ void recordCreatedPath(
   }
   // Created flags can recur after the first create was delivered. Classify
   // against the index so a subsequent write is not emitted as another create.
-  if (!sameIdentity) {
-    events.create(path, entryKind(entry.isDirectory));
-  } else if (modified) {
+  if (modified || replacedFile) {
     events.update(path, EntryKind::File);
+  } else if (!sameIdentity) {
+    events.create(path, entryKind(entry.isDirectory));
   }
 }
 
@@ -398,7 +400,10 @@ void reconcileFullTree(WatcherRef watcher, State *state) {
 
   for (const auto &entry : removed) {
     for (const auto &path : entry.second) {
-      if (handledRemoved.count(path.first) == 0) {
+      const IndexedPath *replacement = current.find(path.first);
+      if (handledRemoved.count(path.first) == 0 &&
+          (path.second.isDirectory || replacement == nullptr ||
+           replacement->isDirectory)) {
         watcher->mEvents.remove(
           path.first, entryKind(path.second.isDirectory)
         );
@@ -408,9 +413,15 @@ void reconcileFullTree(WatcherRef watcher, State *state) {
   for (const auto &entry : created) {
     for (const auto &path : entry.second) {
       if (handledCreated.count(path.first) == 0) {
-        watcher->mEvents.create(
-          path.first, entryKind(path.second.isDirectory)
-        );
+        const IndexedPath *previous = state->identities.find(path.first);
+        if (previous != nullptr && !previous->isDirectory &&
+            !path.second.isDirectory) {
+          watcher->mEvents.update(path.first, EntryKind::File);
+        } else {
+          watcher->mEvents.create(
+            path.first, entryKind(path.second.isDirectory)
+          );
+        }
       }
     }
   }
@@ -580,7 +591,9 @@ void processEvents(
         continue;
       }
 
-      if ((isModified || sameIdentity) && entry) {
+      if ((isModified || sameIdentity ||
+           (previousIdentity != nullptr && !previousIdentity->isDirectory &&
+            !indexed->isDirectory)) && entry) {
         state->identities.add(event.path, *indexed);
         if (!state->tree->update(event.path, indexed->mtime)) {
           state->tree->add(event.path, indexed->mtime, indexed->isDirectory);

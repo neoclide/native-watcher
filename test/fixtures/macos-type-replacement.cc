@@ -129,6 +129,29 @@ void runFileUpdate(WatcherRef watcher, const std::string &root) {
   );
 }
 
+void runAtomicReplacement(
+  WatcherRef watcher,
+  const std::string &root,
+  FSEventStreamEventFlags flags,
+  int index
+) {
+  std::string target = root + "/atomic-" + std::to_string(index) + ".txt";
+  std::string temporary = target + ".tmp";
+  writeFile(target, "before");
+  writeFile(temporary, "after");
+  auto state = indexDirectory(root);
+
+  std::filesystem::rename(temporary, target);
+  processEvents(watcher, state, {PendingEvent {target, flags, 10}});
+  assertEvent(
+    watcher->mEvents.drain(), target, false, false, EntryKind::File
+  );
+  const IndexedPath *indexed = state->identities.find(target);
+  auto current = readIndexedPath(target);
+  assert(indexed != nullptr && current.has_value());
+  assert(indexed->identity == current->identity);
+}
+
 int main(int argc, char **argv) {
   assert(argc == 2);
   std::string root(argv[1]);
@@ -155,4 +178,17 @@ int main(int argc, char **argv) {
     runTypeReplacement(watcher, root, flags);
   }
   runFileUpdate(watcher, root);
+  const FSEventStreamEventFlags atomicFlags[] = {
+    kFSEventStreamEventFlagItemCreated,
+    kFSEventStreamEventFlagItemRenamed,
+    kFSEventStreamEventFlagItemCreated |
+      kFSEventStreamEventFlagItemRenamed,
+    kFSEventStreamEventFlagItemCreated |
+      kFSEventStreamEventFlagItemRemoved,
+    kFSEventStreamEventFlagItemModified,
+    kFSEventStreamEventFlagMustScanSubDirs,
+  };
+  for (size_t index = 0; index < std::size(atomicFlags); ++index) {
+    runAtomicReplacement(watcher, root, atomicFlags[index], index);
+  }
 }
