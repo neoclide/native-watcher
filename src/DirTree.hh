@@ -15,9 +15,9 @@
 
 struct DirEntry {
   std::string path;
-  uint64_t mtime;
-  bool isDir;
-  mutable void *state;
+  uint64_t mtime = 0;
+  bool isDir = false;
+  mutable void *state = nullptr;
 
   DirEntry(std::string p, uint64_t t, bool d);
   DirEntry(FILE *f);
