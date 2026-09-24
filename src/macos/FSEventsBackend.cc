@@ -25,6 +25,16 @@ void stopStream(FSEventStreamRef stream) {
   FSEventStreamRelease(stream);
 }
 
+void stopStreamAfterCallback(FSEventStreamRef stream, dispatch_queue_t queue) {
+  dispatch_retain(queue);
+  dispatch_async(dispatch_get_global_queue(QOS_CLASS_DEFAULT, 0), ^{
+    // The stream's dispatch callback must return before it is released.
+    dispatch_sync(queue, ^ {});
+    stopStream(stream);
+    dispatch_release(queue);
+  });
+}
+
 void flushStreamCallbacks(
   FSEventStreamRef stream,
   dispatch_queue_t queue
@@ -66,7 +76,8 @@ struct PendingEvent {
 class State: public WatcherState {
 public:
   FSEventsBackend *backend = nullptr;
-  FSEventStreamRef stream = nullptr;
+  std::atomic<FSEventStreamRef> stream {nullptr};
+  dispatch_queue_t callbackQueue = nullptr;
   std::shared_ptr<DirTree> tree;
   IdentityIndex identities;
   std::mutex initializationMutex;
@@ -579,9 +590,12 @@ void processEvents(
 
   watcher->notify();
   if (deletedRoot) {
-    watcher->mNeedsResubscribe = true;
-    stopStream((FSEventStreamRef)streamRef);
-    watcher->state = nullptr;
+    auto stream = state->stream.exchange(nullptr);
+    if (stream != nullptr) {
+      watcher->mNeedsResubscribe = true;
+      watcher->state = nullptr;
+      stopStreamAfterCallback(stream, state->callbackQueue);
+    }
   }
 }
 
@@ -596,10 +610,10 @@ void FSEventsCallback(
   char **paths = (char **)eventPaths;
   auto *context = static_cast<WatcherContext *>(clientCallBackInfo);
   WatcherRef &watcher = context->watcher;
-  if (watcher->state == nullptr) return;
-
   auto stateGuard = watcher->state;
+  if (stateGuard == nullptr) return;
   auto *state = static_cast<State *>(stateGuard.get());
+  if (state->stream.load() != streamRef) return;
 
   try {
     std::vector<PendingEvent> events;
@@ -759,8 +773,17 @@ void FSEventsBackend::start() {
 }
 
 FSEventsBackend::~FSEventsBackend() {
-  std::unique_lock<std::mutex> lock(mMutex);
   mStoppedSignal.notify();
+  // The thread uses mStoppedSignal, which is destroyed before Backend's
+  // destructor can join the thread.
+  if (mThread.joinable()) {
+    if (mThread.get_id() == std::this_thread::get_id()) {
+      mThread.detach();
+    } else {
+      mThread.join();
+    }
+  }
+  std::unique_lock<std::mutex> lock(mMutex);
   if (mQueue != nullptr) {
     dispatch_release(mQueue);
     mQueue = nullptr;
@@ -785,14 +808,12 @@ void FSEventsBackend::handleBackendError(std::exception &err) {
 void FSEventsBackend::subscribe(WatcherRef watcher) {
   auto s = std::make_shared<State>();
   s->backend = this;
+  s->callbackQueue = mQueue;
   watcher->state = s;
   try {
     startStream(watcher, kFSEventStreamEventIdSinceNow);
   } catch (...) {
-    if (s->stream != nullptr) {
-      stopStream(s->stream);
-      s->stream = nullptr;
-    }
+    stopStream(s->stream.exchange(nullptr));
     watcher->state = nullptr;
     throw;
   }
@@ -803,7 +824,7 @@ void FSEventsBackend::unsubscribe(WatcherRef watcher) {
   auto stateGuard = watcher->state;
   State* s = static_cast<State*>(stateGuard.get());
   if (s != nullptr) {
-    stopStream(s->stream);
+    stopStream(s->stream.exchange(nullptr));
     watcher->state = nullptr;
   }
 }
