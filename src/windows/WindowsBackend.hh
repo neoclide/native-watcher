@@ -10,6 +10,7 @@ public:
   void start() override;
   ~WindowsBackend();
   void subscribe(WatcherRef watcher) override;
+  void finishSubscribe(WatcherRef watcher, std::shared_ptr<WatcherState> state) override;
   void unsubscribe(WatcherRef watcher) override;
   void finishUnsubscribe(WatcherRef watcher, std::shared_ptr<WatcherState> state) override;
   bool isBackendThread() const;

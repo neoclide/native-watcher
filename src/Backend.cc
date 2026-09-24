@@ -143,16 +143,24 @@ Backend::~Backend() {
 
 void Backend::watch(WatcherRef watcher) {
   std::unique_lock<std::mutex> lock(mMutex);
+  mPendingCondition.wait(lock, [this, &watcher]() {
+    return mPendingSubscriptions.find(watcher) == mPendingSubscriptions.end();
+  });
+
   auto res = mSubscriptions.find(watcher);
   bool isNew = res == mSubscriptions.end();
   bool needsResubscribe = watcher->mNeedsResubscribe.exchange(false);
   bool wasInvalid = !isNew &&
     (mInvalidSubscriptions.erase(watcher) > 0 || needsResubscribe);
   if (isNew || wasInvalid) {
+    mPendingSubscriptions.insert(watcher);
+    std::shared_ptr<WatcherState> state;
     try {
       this->subscribe(watcher);
-      mSubscriptions.insert(watcher);
-    } catch (std::exception&) {
+      state = watcher->state;
+    } catch (...) {
+      mPendingSubscriptions.erase(watcher);
+      mPendingCondition.notify_all();
       if (wasInvalid) {
         mInvalidSubscriptions.insert(watcher);
       } else {
@@ -161,11 +169,39 @@ void Backend::watch(WatcherRef watcher) {
       }
       throw;
     }
+
+    lock.unlock();
+    try {
+      this->finishSubscribe(watcher, state);
+    } catch (...) {
+      lock.lock();
+      if (watcher->state == state) {
+        watcher->state = nullptr;
+      }
+      mPendingSubscriptions.erase(watcher);
+      mPendingCondition.notify_all();
+      if (wasInvalid) {
+        mInvalidSubscriptions.insert(watcher);
+      } else {
+        lock.unlock();
+        unref();
+      }
+      throw;
+    }
+
+    lock.lock();
+    mPendingSubscriptions.erase(watcher);
+    mPendingCondition.notify_all();
+    mSubscriptions.insert(watcher);
   }
 }
 
 void Backend::unwatch(WatcherRef watcher, bool force) {
   std::unique_lock<std::mutex> lock(mMutex);
+  mPendingCondition.wait(lock, [this, &watcher]() {
+    return mPendingSubscriptions.find(watcher) == mPendingSubscriptions.end();
+  });
+
   if (!force && watcher->hasCallbacks()) {
     return;
   }
@@ -201,7 +237,7 @@ void Backend::invalidate(WatcherRef watcher) {
 void Backend::unref() {
   std::unique_lock<std::mutex> registryLock(getSharedBackendsMutex());
   std::unique_lock<std::mutex> lock(mMutex);
-  if (mSubscriptions.size() == 0 && mSharedReservations.load() == 0) {
+  if (mSubscriptions.size() == 0 && mPendingSubscriptions.size() == 0 && mSharedReservations.load() == 0) {
     removeSharedLocked(this);
   }
 }
@@ -221,6 +257,9 @@ void Backend::handleError(std::exception &err) {
   {
     std::unique_lock<std::mutex> lock(mMutex);
     for (auto it = mSubscriptions.begin(); it != mSubscriptions.end(); it++) {
+      (*it)->notifyError(err);
+    }
+    for (auto it = mPendingSubscriptions.begin(); it != mPendingSubscriptions.end(); it++) {
       (*it)->notifyError(err);
     }
     cleanupAfterError();

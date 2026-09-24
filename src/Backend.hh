@@ -15,6 +15,7 @@ public:
 
   virtual void start();
   virtual void subscribe(WatcherRef watcher) = 0;
+  virtual void finishSubscribe(WatcherRef watcher, std::shared_ptr<WatcherState> state) {}
   virtual void unsubscribe(WatcherRef watcher) = 0;
   virtual void finishUnsubscribe(WatcherRef watcher, std::shared_ptr<WatcherState> state) {}
   virtual void cleanupAfterError() {}
@@ -35,6 +36,8 @@ protected:
   void handleError(std::exception &err);
 private:
   std::unordered_set<WatcherRef> mInvalidSubscriptions;
+  std::unordered_set<WatcherRef> mPendingSubscriptions;
+  std::condition_variable mPendingCondition;
   std::atomic<size_t> mSharedReservations {0};
   std::mutex mStartupMutex;
   std::condition_variable mStartupCondition;

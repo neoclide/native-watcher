@@ -583,13 +583,19 @@ void WindowsBackend::subscribe(WatcherRef watcher) {
     watcher->state = nullptr;
     throw std::runtime_error("Unable to queue APC");
   }
-  try {
-    sub->waitForStart();
-  } catch (...) {
-    sub->requestStop();
-    sub->waitForStop();
-    watcher->state = nullptr;
-    throw;
+}
+
+// Wait outside the Backend lock so the APC and completion callback can run without deadlocking on mMutex.
+void WindowsBackend::finishSubscribe(WatcherRef watcher, std::shared_ptr<WatcherState> state) {
+  auto sub = std::static_pointer_cast<Subscription>(state);
+  if (sub != nullptr) {
+    try {
+      sub->waitForStart();
+    } catch (...) {
+      sub->requestStop();
+      sub->waitForStop();
+      throw;
+    }
   }
 }
 
