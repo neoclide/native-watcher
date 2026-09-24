@@ -653,7 +653,7 @@ void InotifyBackend::unsubscribe(WatcherRef watcher) {
     if (it->second->watcher.get() == watcher.get()) {
       if (mSubscriptions.count(it->first) == 1) {
         int err = inotify_rm_watch(mInotify, it->first);
-        if (err == -1) {
+        if (err == -1 && errno != EINVAL) {
           throw WatcherError(std::string("Unable to remove watcher: ") + strerror(errno), watcher);
         }
       }

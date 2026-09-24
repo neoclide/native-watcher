@@ -823,6 +823,58 @@ test(
 );
 
 test(
+  'continues Linux unsubscribe after the kernel already removed watches',
+  {skip: process.platform !== 'linux'},
+  async () => {
+    const tempDirectory = await fs.mkdtemp(
+      path.join(os.tmpdir(), 'native-watcher-rm-watch-shim-'),
+    );
+    try {
+      const shim = path.join(tempDirectory, 'inotify-rm-watch.so');
+      await execFileAsync('cc', [
+        '-shared',
+        '-fPIC',
+        '-o',
+        shim,
+        path.join(__dirname, 'fixtures', 'inotify-rm-watch.c'),
+        '-ldl',
+      ]);
+      const fixture = path.join(
+        __dirname,
+        'fixtures',
+        'linux-unsubscribe-rm-watch.js',
+      );
+      const einval = await execFileAsync(process.execPath, [fixture, 'einval'], {
+        env: {
+          ...process.env,
+          LD_PRELOAD: shim,
+          NATIVE_WATCHER_RM_WATCH_MODE: 'einval',
+        },
+        timeout: 5_000,
+      });
+      assert.match(einval.stdout, /inotify rm_watch unsubscribe fixture ok/);
+      assert.ok(
+        (einval.stderr.match(/inotify-rm-watch-shim: EINVAL/g) ?? []).length >= 4,
+        `expected every root and child watch to be removed: ${einval.stderr}`,
+      );
+
+      const eio = await execFileAsync(process.execPath, [fixture, 'eio'], {
+        env: {
+          ...process.env,
+          LD_PRELOAD: shim,
+          NATIVE_WATCHER_RM_WATCH_MODE: 'eio',
+        },
+        timeout: 5_000,
+      });
+      assert.match(eio.stdout, /inotify rm_watch unsubscribe fixture ok/);
+      assert.match(eio.stderr, /inotify-rm-watch-shim: EIO/);
+    } finally {
+      await fs.rm(tempDirectory, {recursive: true, force: true});
+    }
+  },
+);
+
+test(
   'waits for pending Windows directory reads before unsubscribe resolves',
   {skip: process.platform !== 'win32'},
   async () => {
