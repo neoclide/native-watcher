@@ -380,9 +380,11 @@ public:
               data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY
             );
           }
+          // A preceding removal may already have consumed the source tree.
+          // Rebuild all descendants after clearing the apparent target above.
           if (hasAttributes && supported &&
               (data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) &&
-              (!mWatcher->mIgnorePaths.empty() ||
+              (moved.empty() || !mWatcher->mIgnorePaths.empty() ||
                !mWatcher->mIgnoreGlobs.empty())) {
             addPath(path);
           }
@@ -410,8 +412,8 @@ public:
         flushPendingRename();
         mRemovedPaths.insert(path);
         removePath(path);
-        // NTFS can report a case-only rename as a removal without a new-name
-        // notification. Recover the on-disk spelling and rebuild descendants.
+        // NTFS can report a removal before the case-only rename pair. Recover
+        // the on-disk spelling, including when no paired notification follows.
         WIN32_FIND_DATAW data;
         HANDLE search = FindFirstFileW(utf8ToUtf16(path).c_str(), &data);
         if (search != INVALID_HANDLE_VALUE) {

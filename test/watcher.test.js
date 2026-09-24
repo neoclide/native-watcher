@@ -547,6 +547,17 @@ test(
       const events = await observed;
       assertEvent(events, 'update', newChild);
       assert.ok(events.every((event) => event.path !== oldChild));
+
+      mark = collector.mark();
+      const added = path.join(newDirectory, 'added.txt');
+      observed = collector.waitFor('create', added, mark);
+      await fs.writeFile(added, 'new');
+      await observed;
+
+      mark = collector.mark();
+      observed = collector.waitFor('delete', newChild, mark);
+      await fs.unlink(newChild);
+      await observed;
     } finally {
       await subscription.unsubscribe();
       await fs.rm(directory, {recursive: true, force: true});
