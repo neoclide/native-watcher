@@ -47,11 +47,13 @@ std::shared_ptr<DirTree> DirTree::getCached(std::string root) {
 }
 
 DirTree::DirTree(std::string root, FILE *f) : root(root), isComplete(true) {
-  size_t size;
-  if (fscanf(f, "%zu", &size)) {
+  size_t size = 0;
+  if (fscanf(f, "%zu", &size) == 1) {
     for (size_t i = 0; i < size; i++) {
       DirEntry entry(f);
-      entries.emplace(entry.path, entry);
+      if (!entry.path.empty()) {
+        entries.emplace(entry.path, entry);
+      }
     }
   }
 }
@@ -197,13 +199,14 @@ DirEntry::DirEntry(std::string p, uint64_t t, bool d) {
 }
 
 DirEntry::DirEntry(FILE *f) : mtime(0), isDir(false), state(NULL) {
-  size_t size;
+  size_t size = 0;
   if (fscanf(f, "%zu", &size) == 1 && fgetc(f) == ':') {
     path.resize(size);
     if (fread(path.data(), sizeof(char), size, f) == size) {
       int d = 0;
-      fscanf(f, "%" PRIu64 " %d\n", &mtime, &d);
-      isDir = d == 1;
+      if (fscanf(f, "%" PRIu64 " %d\n", &mtime, &d) == 2) {
+        isDir = d == 1;
+      }
     }
   }
 }
