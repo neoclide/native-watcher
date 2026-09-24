@@ -162,15 +162,12 @@ public:
       return;
     }
 
-    auto queued = new std::shared_ptr<Subscription>(shared_from_this());
     bool success = QueueUserAPC([](__in ULONG_PTR ptr) {
-      std::unique_ptr<std::shared_ptr<Subscription>> subscription(
-        reinterpret_cast<std::shared_ptr<Subscription> *>(ptr)
-      );
-      (*subscription)->beginStop();
-    }, mBackend->mThread.native_handle(), (ULONG_PTR)queued);
+      auto sub = reinterpret_cast<Subscription *>(ptr);
+      auto keepAlive = sub->shared_from_this();
+      sub->beginStop();
+    }, mBackend->mThread.native_handle(), (ULONG_PTR)this);
     if (!success) {
-      delete queued;
       mStopRequested = false;
       throw std::runtime_error("Unable to queue subscription stop");
     }
