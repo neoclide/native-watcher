@@ -12,8 +12,6 @@
 #include "DirTree.hh"
 #include "Signal.hh"
 
-using namespace Napi;
-
 struct Watcher;
 class Backend;
 using WatcherRef = std::shared_ptr<Watcher>;
@@ -50,8 +48,8 @@ struct Watcher : public std::enable_shared_from_this<Watcher> {
   void wait();
   void notify();
   void notifyError(std::exception &err);
-  bool watch(Function callback);
-  bool unwatch(Function callback);
+  bool watch(Napi::Function callback);
+  bool unwatch(Napi::Function callback);
   bool hasCallbacks();
   bool hasCallbacksForEnvironment(napi_env env);
   void addBackend(std::shared_ptr<Backend> backend);
@@ -76,7 +74,7 @@ private:
   std::mutex mIgnoreAliasesMutex;
   std::unordered_set<std::string> mIgnoreAliases;
 
-  std::vector<Callback>::iterator findCallback(Function callback);
+  std::vector<Callback>::iterator findCallback(Napi::Function callback);
   void clearCallbacks();
   void triggerCallbacks();
 };
