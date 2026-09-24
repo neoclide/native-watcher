@@ -246,15 +246,11 @@ public:
         return;
       case ERROR_ACCESS_DENIED: {
         // This can happen if the watched directory is deleted. Check if that is the case,
-        // and if so emit a delete event. Otherwise, fall through to default error case.
+        // and if so stop subscription and report terminal error. Otherwise, fall through to default error case.
         DWORD attrs = GetFileAttributesW(utf8ToUtf16(mWatcher->mDir).data());
         bool isDir = attrs != INVALID_FILE_ATTRIBUTES && (attrs & FILE_ATTRIBUTE_DIRECTORY);
         if (!isDir) {
-          removePath(mWatcher->mDir);
-          mWatcher->notify();
-          invalidateCurrent();
-          requestStop();
-          return;
+          throw WatcherError("Watched directory was deleted", mWatcher);
         }
       }
       default:

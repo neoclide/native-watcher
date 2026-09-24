@@ -1011,6 +1011,36 @@ test(
 );
 
 test(
+  'reports an error and stops subscription when watched root is deleted on Windows',
+  {skip: process.platform !== 'win32'},
+  async () => {
+    const parent = await fs.mkdtemp(
+      path.join(os.tmpdir(), 'native-watcher-windows-root-'),
+    );
+    const directory = path.join(parent, 'watched');
+    await fs.mkdir(directory);
+
+    let reportedError = null;
+    const subscription = await watcher.subscribe(directory, (error) => {
+      if (error) reportedError = error;
+    });
+
+    try {
+      await fs.rmdir(directory);
+      const start = Date.now();
+      while (!reportedError && Date.now() - start < 5000) {
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      }
+      assert.ok(reportedError, 'expected error when watched root is deleted');
+      assert.match(reportedError.message, /watched directory was deleted/i);
+    } finally {
+      await subscription.unsubscribe();
+      await fs.rm(parent, {recursive: true, force: true});
+    }
+  },
+);
+
+test(
   'scans existing Unicode paths on Windows',
   {skip: process.platform !== 'win32'},
   async () => {
