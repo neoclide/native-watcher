@@ -207,7 +207,7 @@ void Watcher::notifyError(std::exception &err) {
 
     it->closing = true;
     CallbackData *data = new CallbackData(err.what(), watcher, it->id);
-    napi_status status = napi_call_threadsafe_function(it->tsfn, data, napi_tsfn_blocking);
+    napi_status status = napi_call_threadsafe_function(it->tsfn, data, napi_tsfn_nonblocking);
     if (status != napi_ok) {
       delete data;
     }
@@ -229,7 +229,7 @@ void Watcher::triggerCallbacks() {
       }
 
       auto data = new CallbackData(batch.error, batch.events);
-      napi_status status = napi_call_threadsafe_function(it->tsfn, data, napi_tsfn_blocking);
+      napi_status status = napi_call_threadsafe_function(it->tsfn, data, napi_tsfn_nonblocking);
       if (status != napi_ok) {
         delete data;
         if (status == napi_closing) {
