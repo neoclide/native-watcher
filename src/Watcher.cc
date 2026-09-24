@@ -403,6 +403,7 @@ bool isPathOrDescendant(const std::string &path, const std::string &base) {
      path[base.size()] == DIR_SEP[0]);
 }
 
+#if defined(FS_EVENTS) || defined(WINDOWS)
 bool equalIgnoringCase(const std::string &left, const std::string &right) {
 #ifdef FS_EVENTS
   CFStringRef a = CFStringCreateWithBytes(
@@ -426,8 +427,6 @@ bool equalIgnoringCase(const std::string &left, const std::string &right) {
     a.c_str(), static_cast<int>(a.size()),
     b.c_str(), static_cast<int>(b.size()), TRUE
   ) == CSTR_EQUAL;
-#else
-  return left == right;
 #endif
 }
 
@@ -452,6 +451,7 @@ bool refersToSameEntry(const std::string &left, const std::string &right) {
   return true;
 #endif
 }
+#endif
 
 } // namespace
 
