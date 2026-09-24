@@ -57,10 +57,12 @@ bool getIgnoreGlobs(
 }
 
 std::shared_ptr<Backend> getBackend(Env env, Value opts) {
-  Value b = opts.As<Object>().Get(String::New(env, "backend"));
   std::string backendName;
-  if (b.IsString()) {
-    backendName = std::string(b.As<String>().Utf8Value().c_str());
+  if (opts.IsObject()) {
+    Value b = opts.As<Object>().Get(String::New(env, "backend"));
+    if (b.IsString()) {
+      backendName = std::string(b.As<String>().Utf8Value().c_str());
+    }
   }
 
   try {
