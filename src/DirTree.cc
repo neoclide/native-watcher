@@ -197,11 +197,11 @@ DirEntry::DirEntry(std::string p, uint64_t t, bool d) {
   state = NULL;
 }
 
-DirEntry::DirEntry(FILE *f) {
+DirEntry::DirEntry(FILE *f) : mtime(0), isDir(false), state(NULL) {
   size_t size;
-  if (fscanf(f, "%zu", &size)) {
+  if (fscanf(f, "%zu", &size) == 1 && fgetc(f) == ':') {
     path.resize(size);
-    if (fread(&path[0], sizeof(char), size, f)) {
+    if (fread(path.data(), sizeof(char), size, f) == size) {
       int d = 0;
       fscanf(f, "%" PRIu64 " %d\n", &mtime, &d);
       isDir = d == 1;
@@ -210,5 +210,5 @@ DirEntry::DirEntry(FILE *f) {
 }
 
 void DirEntry::write(FILE *f) const {
-  fprintf(f, "%zu%s%" PRIu64 " %d\n", path.size(), path.c_str(), mtime, isDir);
+  fprintf(f, "%zu:%s%" PRIu64 " %d\n", path.size(), path.c_str(), mtime, isDir);
 }
