@@ -156,6 +156,7 @@ void Backend::watch(WatcherRef watcher) {
       if (wasInvalid) {
         mInvalidSubscriptions.insert(watcher);
       } else {
+        lock.unlock();
         unref();
       }
       throw;
@@ -185,6 +186,7 @@ void Backend::unwatch(WatcherRef watcher, bool force) {
     this->finishUnsubscribe(watcher, state);
     lock.lock();
     watcher->removeBackend(this);
+    lock.unlock();
     unref();
   }
 }
@@ -198,6 +200,7 @@ void Backend::invalidate(WatcherRef watcher) {
 
 void Backend::unref() {
   std::unique_lock<std::mutex> registryLock(getSharedBackendsMutex());
+  std::unique_lock<std::mutex> lock(mMutex);
   if (mSubscriptions.size() == 0 && mSharedReservations.load() == 0) {
     removeSharedLocked(this);
   }
@@ -205,7 +208,6 @@ void Backend::unref() {
 
 void Backend::releaseShared() {
   if (mSharedReservations.fetch_sub(1) == 1) {
-    std::unique_lock<std::mutex> lock(mMutex);
     unref();
   }
 }
