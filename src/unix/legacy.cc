@@ -28,8 +28,8 @@ void iterateDir(WatcherRef watcher, const std::shared_ptr <DirTree> tree, const 
     int open_flags = (O_RDONLY | O_CLOEXEC | O_DIRECTORY | O_NOCTTY | O_NONBLOCK | O_NOFOLLOW);
     int new_fd = openat(parent_fd, relative, open_flags);
     if (new_fd == -1) {
-        if (errno == EACCES) {
-            return; // ignore insufficient permissions
+        if (errno == EACCES || errno == ENOENT) {
+            return; // ignore insufficient permissions or removed directory
         }
 
         throw WatcherError(strerror(errno), watcher);
@@ -64,6 +64,9 @@ void iterateDir(WatcherRef watcher, const std::shared_ptr <DirTree> tree, const 
                     &attrib,
                     AT_SYMLINK_NOFOLLOW
                 ) == -1) {
+                    if (errno == ENOENT) {
+                        continue;
+                    }
                     throw WatcherError(strerror(errno), watcher);
                 }
                 bool isDir = S_ISDIR(attrib.st_mode);
