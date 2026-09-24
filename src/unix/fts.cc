@@ -1,3 +1,4 @@
+#include <memory>
 #include <string>
 
 // weird error on linux
@@ -23,28 +24,26 @@ void BruteForceBackend::readTree(WatcherRef watcher, std::shared_ptr<DirTree> tr
     throw WatcherError(strerror(errno), watcher);
   }
 
+  std::unique_ptr<FTS, decltype(&fts_close)> ftsGuard(fts, fts_close);
+
   FTSENT *node;
   bool isRoot = true;
 
-  while ((node = fts_read(fts)) != NULL) {
+  while ((node = fts_read(ftsGuard.get())) != NULL) {
     if (node->fts_errno) {
-      fts_close(fts);
       throw WatcherError(strerror(node->fts_errno), watcher);
     }
 
     if (isRoot && !(node->fts_info & FTS_D)) {
-      fts_close(fts);
       throw WatcherError(strerror(ENOTDIR), watcher);
     }
 
     if (watcher->isIgnored(std::string(node->fts_path))) {
-      fts_set(fts, node, FTS_SKIP);
+      fts_set(ftsGuard.get(), node, FTS_SKIP);
       continue;
     }
 
     tree->add(node->fts_path, CONVERT_TIME(node->fts_statp->st_mtim), (node->fts_info & FTS_D) == FTS_D);
     isRoot = false;
   }
-
-  fts_close(fts);
 }
