@@ -225,6 +225,9 @@ public:
       case ERROR_OPERATION_ABORTED:
         return;
       case ERROR_INVALID_PARAMETER:
+        if (mReadBuffer.size() <= NETWORK_BUF_SIZE) {
+          throw WatcherError("Invalid parameter watching directory", mWatcher);
+        }
         // resize buffers to network size (64kb), and try again
         mReadBuffer.resize(NETWORK_BUF_SIZE);
         mWriteBuffer.resize(NETWORK_BUF_SIZE);
