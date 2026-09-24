@@ -136,8 +136,14 @@ void recordCreatedPath(
     previous->isDirectory == entry.isDirectory;
   bool modified = sameIdentity && !entry.isDirectory &&
     previous->mtime != entry.mtime;
+  bool typeChanged = previous != nullptr &&
+    previous->isDirectory != entry.isDirectory;
+  if (typeChanged) {
+    removeIndexedPath(state, events, path);
+  } else if (!sameIdentity) {
+    state->tree->remove(path);
+  }
   state->identities.add(path, entry);
-  if (!sameIdentity) state->tree->remove(path);
   if (!state->tree->update(path, entry.mtime)) {
     state->tree->add(path, entry.mtime, entry.isDirectory);
   }
@@ -522,7 +528,9 @@ void processEvents(
       bool sameIdentity = previousIdentity != nullptr &&
         previousIdentity->identity == indexed->identity;
       auto entry = state->tree->find(event.path);
-      if (previousIdentity == nullptr || !entry) {
+      bool typeChanged = previousIdentity != nullptr &&
+        previousIdentity->isDirectory != indexed->isDirectory;
+      if (previousIdentity == nullptr || !entry || typeChanged) {
         try {
           addCreatedPath(watcher, state, list, event.path);
         } catch (const std::exception &error) {
@@ -557,6 +565,16 @@ void processEvents(
       bool sameIdentity = previousIdentity != nullptr &&
         previousIdentity->identity == indexed->identity;
       auto entry = state->tree->find(event.path);
+      bool typeChanged = previousIdentity != nullptr &&
+        previousIdentity->isDirectory != indexed->isDirectory;
+      if (typeChanged) {
+        try {
+          addCreatedPath(watcher, state, list, event.path);
+        } catch (const std::exception &error) {
+          list.error(error.what());
+        }
+        continue;
+      }
       if (!hasMetadataChange && entry && sameIdentity && entry->mtime == indexed->mtime &&
           indexed->mtime % 1000000000 != 0) {
         continue;
