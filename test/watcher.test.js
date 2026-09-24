@@ -68,6 +68,52 @@ test('reports an atomic replacement of an existing file as update on macOS',
     `replacement reported as create: ${JSON.stringify(events)}`);
   });
 
+for (const [name, prepare, createReplacement, oldKind, newKind] of [
+  [
+    'file to directory',
+    (target) => fs.writeFile(target, 'before'),
+    (target) => fsSync.mkdirSync(target),
+    'file',
+    'directory',
+  ],
+  [
+    'directory to file',
+    (target) => fs.mkdir(target),
+    (target) => fsSync.writeFileSync(target, 'after'),
+    'directory',
+    'file',
+  ],
+]) {
+  test(`reports delete and create for a rapid ${name} replacement`,
+    {skip: process.platform !== 'darwin' && process.platform !== 'linux'},
+    async (t) => {
+      let target;
+      const {directory, collector} = await createFixture(t, undefined, async (root) => {
+        target = path.join(root, 'target');
+        await prepare(target);
+      });
+      const moved = `${directory}-moved-target`;
+      t.after(() => fs.rm(moved, {recursive: true, force: true}));
+
+      // Ensure the startup scan and any queued startup events are delivered.
+      const barrier = path.join(directory, 'barrier');
+      const ready = collector.waitFor('create', barrier);
+      await fs.writeFile(barrier, 'ready');
+      await ready;
+
+      const mark = collector.mark();
+      const replacement = collector.waitFrom(mark, (events) =>
+        events.some((event) => event.path === target &&
+          event.type === 'delete' && event.kind === oldKind) &&
+        events.some((event) => event.path === target &&
+          event.type === 'create' && event.kind === newKind),
+      );
+      fsSync.renameSync(target, moved);
+      createReplacement(target);
+      await replacement;
+    });
+}
+
 test('rapid file changes do not leave a stale final event state', async (t) => {
   const {directory, collector} = await createFixture(t);
   const ephemeral = path.join(directory, 'ephemeral.txt');

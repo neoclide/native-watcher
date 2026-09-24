@@ -354,10 +354,11 @@ void InotifyBackend::flushExpiredMoves() {
 
     auto &move = it->second;
     // A new entry may have reused this path while the old move was waiting
-    // for its pair. Do not report the old entry's removal as a deletion of
-    // the new one; its create event already describes the current path.
+    // for its pair. Suppress the old deletion only when it has the same kind
+    // as the replacement; a type change needs both typed events.
     for (const auto &entry : move.entries) {
-      if (!move.tree->find(entry.path)) {
+      auto replacement = move.tree->find(entry.path);
+      if (!replacement || replacement->isDir != entry.isDir) {
         move.watcher->mEvents.remove(entry.path, entryKind(entry.isDir));
       }
     }

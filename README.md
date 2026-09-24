@@ -110,8 +110,8 @@ type WatchEvent = {
 };
 ```
 
-Events are batched and coalesced by path. Consumers must not depend on event
-ordering or on seeing every intermediate filesystem operation. For example, a
+Events are batched and coalesced by path and kind. Consumers must not depend on
+event ordering or on seeing every intermediate filesystem operation. For example, a
 rapid create followed by updates can be delivered as one `create`, and a rapid
 update followed by deletion can be delivered as one `delete`.
 

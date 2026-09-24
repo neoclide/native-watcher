@@ -7,6 +7,7 @@
 #include <mutex>
 #include <map>
 #include <optional>
+#include <utility>
 #include <unordered_map>
 #include <vector>
 
@@ -70,7 +71,7 @@ public:
     EntryKind kind
   ) {
     std::lock_guard<std::mutex> l(mMutex);
-    auto old = mEvents.find(oldPath);
+    auto old = mEvents.find({oldPath, kind});
 
     // A path created and then renamed within one debounce window should remain
     // a single create at its final location. If it was itself the result of a
@@ -172,17 +173,18 @@ public:
   }
 
 private:
+  using EventKey = std::pair<std::string, EntryKind>;
   mutable std::mutex mMutex;
-  std::map<std::string, Event> mEvents;
+  std::map<EventKey, Event> mEvents;
   std::optional<std::string> mError;
   Event *internalUpdate(std::string path, EntryKind kind) {
-    auto found = mEvents.find(path);
+    EventKey key {path, kind};
+    auto found = mEvents.find(key);
     if (found == mEvents.end()) {
-      auto it = mEvents.emplace(path, Event(path, kind));
+      auto it = mEvents.emplace(std::move(key), Event(path, kind));
       return &it.first->second;
     }
 
-    found->second.kind = kind;
     return &found->second;
   }
 };

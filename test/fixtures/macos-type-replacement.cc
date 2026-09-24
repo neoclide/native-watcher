@@ -81,6 +81,8 @@ void runTypeReplacement(
     }}
   );
   auto removed = watcher->mEvents.drain();
+  assertEvent(removed, target, false, true, EntryKind::Directory);
+  assertEvent(removed, target, true, false, EntryKind::File);
   assertEvent(removed, child, false, true, EntryKind::File);
   auto targetIndex = state->identities.find(target);
   assert(targetIndex != nullptr && !targetIndex->isDirectory);
@@ -100,6 +102,8 @@ void runTypeReplacement(
     }}
   );
   auto created = watcher->mEvents.drain();
+  assertEvent(created, target, false, true, EntryKind::File);
+  assertEvent(created, target, true, false, EntryKind::Directory);
   assertEvent(created, child, true, false, EntryKind::File);
   targetIndex = state->identities.find(target);
   assert(targetIndex != nullptr && targetIndex->isDirectory);

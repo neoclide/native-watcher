@@ -47,6 +47,35 @@ test(
   },
 );
 
+test('preserves both event kinds when a path changes type in one batch',
+  {skip: process.platform === 'win32'}, async (t) => {
+    const directory = await fs.mkdtemp(
+      path.join(await fs.realpath(os.tmpdir()), 'native-watcher-event-kind-'),
+    );
+    try {
+      const binary = path.join(directory, 'event-list-type-replacement');
+      await execFileAsync('c++', [
+        '-std=c++17',
+        '-ffunction-sections',
+        '-fdata-sections',
+        process.platform === 'darwin' ? '-Wl,-dead_strip' : '-Wl,--gc-sections',
+        `-I${require('node-addon-api').include.replace(/^"|"$/g, '')}`,
+        `-I${path.resolve(process.execPath, '..', '..', 'include', 'node')}`,
+        `-I${path.join(__dirname, '..', 'src')}`,
+        path.join(__dirname, 'fixtures', 'event-list-type-replacement.cc'),
+        '-o', binary,
+      ]);
+      await t.test('file to directory', async () => {
+        await execFileAsync(binary, ['file-to-directory']);
+      });
+      await t.test('directory to file', async () => {
+        await execFileAsync(binary, ['directory-to-file']);
+      });
+    } finally {
+      await fs.rm(directory, {recursive: true, force: true});
+    }
+  });
+
 function waitForEvents(queue, predicate = () => true, timeout = 5000) {
   if (queue.error) return Promise.reject(queue.error);
   return new Promise((resolve, reject) => {
