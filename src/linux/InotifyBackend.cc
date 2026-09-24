@@ -1,4 +1,5 @@
 #include <memory>
+#include <vector>
 #include <cstring>
 #include <poll.h>
 #include <unistd.h>
@@ -182,6 +183,8 @@ bool InotifyBackend::addCreatedTree(
     tree->add(path, CONVERT_TIME(attributes.st_mtim), true);
   }
 
+  std::vector<std::string> subdirectories;
+
   while (dirent *item = readdir(directory)) {
     if (strcmp(item->d_name, ".") == 0 || strcmp(item->d_name, "..") == 0) {
       continue;
@@ -204,9 +207,16 @@ bool InotifyBackend::addCreatedTree(
       }
     }
 
-    if (isDirectory &&
-        (!watchDir(watcher, candidate, tree) ||
-         !addCreatedTree(watcher, candidate, tree, reportEvents))) {
+    if (isDirectory) {
+      subdirectories.push_back(std::move(candidate));
+    }
+  }
+
+  closedir(directory);
+
+  for (const auto &candidate : subdirectories) {
+    if (!watchDir(watcher, candidate, tree) ||
+        !addCreatedTree(watcher, candidate, tree, reportEvents)) {
       int error = errno;
       if (error == ENOENT || error == ENOTDIR) {
         // The entry moved or changed type between lstat and opening it.
@@ -215,13 +225,11 @@ bool InotifyBackend::addCreatedTree(
         tree->remove(candidate);
         continue;
       }
-      closedir(directory);
       errno = error;
       return false;
     }
   }
 
-  closedir(directory);
   return true;
 }
 
