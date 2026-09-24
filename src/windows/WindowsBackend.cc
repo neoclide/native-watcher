@@ -141,17 +141,13 @@ public:
       mBackend->readTree(mWatcher, mTree);
       mTree->isComplete = true;
       mStartSignal.notify();
-    } catch (WatcherError &err) {
-      if (mPollPending) {
-        CancelIoEx(mDirectoryHandle, &mOverlapped);
-      }
-      mStartError = err.what();
-      mStartSignal.notify();
     } catch (std::exception &err) {
-      if (mPollPending) {
-        CancelIoEx(mDirectoryHandle, &mOverlapped);
-      }
       mStartError = err.what();
+      requestStop();
+      mStartSignal.notify();
+    } catch (...) {
+      mStartError = "Unknown subscription start error";
+      requestStop();
       mStartSignal.notify();
     }
   }
@@ -590,6 +586,8 @@ void WindowsBackend::subscribe(WatcherRef watcher) {
   try {
     sub->waitForStart();
   } catch (...) {
+    sub->requestStop();
+    sub->waitForStop();
     watcher->state = nullptr;
     throw;
   }
