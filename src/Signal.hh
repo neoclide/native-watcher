@@ -17,7 +17,8 @@ public:
 
   std::cv_status waitFor(std::chrono::milliseconds ms) {
     std::unique_lock<std::mutex> lock(mMutex);
-    return mCond.wait_for(lock, ms);
+    return mCond.wait_for(lock, ms, [this] { return mFlag; })
+      ? std::cv_status::no_timeout : std::cv_status::timeout;
   }
 
   void notify() {

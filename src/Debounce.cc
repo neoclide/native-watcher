@@ -72,6 +72,7 @@ void Debounce::notifyIfReady() {
 }
 
 void Debounce::wait() {
+  mWaitSignal.reset();
   auto status = mWaitSignal.waitFor(std::chrono::milliseconds(MIN_WAIT_TIME));
   if (mRunning && (status == std::cv_status::timeout)) {
     notify();
