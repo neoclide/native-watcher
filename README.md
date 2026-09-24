@@ -49,9 +49,7 @@ cp /path/to/native_watcher.node build/Release/native_watcher.node
 ```
 
 The artifact must match the operating system, CPU architecture, and on Linux the
-C library. The addon uses Node-API 8. This repository is currently private to
-npm (`"private": true`); the GitHub artifacts are build outputs, not npm
-packages.
+C library. The addon uses Node-API 8.
 
 ## API
 
