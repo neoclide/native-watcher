@@ -646,7 +646,14 @@ void FSEventsCallback(
     std::vector<PendingEvent> events;
     events.reserve(numEvents);
     for (size_t i = 0; i < numEvents; ++i) {
+      if (watcher->isIgnored(paths[i])) {
+        continue;
+      }
       events.push_back(PendingEvent {paths[i], eventFlags[i], eventIds[i]});
+    }
+
+    if (events.empty()) {
+      return;
     }
 
     {
@@ -776,23 +783,31 @@ void FSEventsBackend::startStream(WatcherRef watcher, FSEventStreamEventId id) {
     state->identities = std::move(identities);
   }
 
-  // Events can arrive while the initial identity index is being scanned. The
-  // recorded paths may already be stale after a rename chain, so reconcile
-  // against the current filesystem until a scan completes without receiving
-  // another event batch.
-  while (state->stream.load() == stream) {
-    flushStreamCallbacks(stream, mQueue);
+  // Events can arrive while the initial identity index is being scanned.
+  // Flush those startup events and hand off bounded processing to the queue
+  // rather than waiting indefinitely for the tree to become quiet.
+  flushStreamCallbacks(stream, mQueue);
+  dispatch_sync(mQueue, ^{
+    if (state->stream.load() != stream) {
+      return;
+    }
+    std::vector<PendingEvent> pending;
     {
       std::lock_guard<std::mutex> lock(state->initializationMutex);
-      if (state->pendingEvents.empty()) {
-        state->initializing = false;
-        break;
-      }
-      state->pendingEvents.clear();
+      state->initializing = false;
+      pending.swap(state->pendingEvents);
     }
-    reconcileFullTree(watcher, state);
-    watcher->notify();
-  }
+    if (!pending.empty()) {
+      try {
+        processEvents(watcher, stateGuard, pending);
+      } catch (std::exception &err) {
+        auto backend = state->backend.lock();
+        if (backend != nullptr) {
+          backend->handleBackendError(err);
+        }
+      }
+    }
+  });
 }
 
 void FSEventsBackend::start() {

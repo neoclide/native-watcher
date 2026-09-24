@@ -278,6 +278,48 @@ test('remains usable when a subtree changes during initial scanning', async () =
   }
 });
 
+test(
+  'subscription completes promptly while an ignored file is continuously modified',
+  {skip: process.platform !== 'darwin'},
+  async () => {
+    const tempDirectory = await fs.realpath(os.tmpdir());
+    const directory = await fs.mkdtemp(
+      path.join(tempDirectory, 'native-watcher-ignored-log-'),
+    );
+    for (let i = 0; i < 50; i++) {
+      const sub = path.join(directory, 'folder-' + i);
+      await fs.mkdir(sub);
+      await fs.writeFile(path.join(sub, 'file.txt'), 'content');
+    }
+    const log = path.join(directory, 'ignored.log');
+    await fs.writeFile(log, 'init\n');
+
+    let running = true;
+    const writeLoop = async () => {
+      while (running) {
+        try {
+          await fs.appendFile(log, 'line\n');
+        } catch (_) {}
+      }
+    };
+    const writing = writeLoop();
+
+    let subscription;
+    try {
+      subscription = await watcher.subscribe(
+        directory,
+        () => {},
+        {ignore: ['*.log']},
+      );
+    } finally {
+      running = false;
+      await writing;
+      if (subscription) await subscription.unsubscribe();
+      await fs.rm(directory, {recursive: true, force: true});
+    }
+  },
+);
+
 test('indexes and reports a populated directory moved into the root', async (t) => {
   const tempDirectory = await fs.realpath(os.tmpdir());
   const parent = await fs.mkdtemp(path.join(tempDirectory, 'native-watcher-move-'));

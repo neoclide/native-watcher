@@ -499,7 +499,11 @@ bool InotifyBackend::handleSubscription(struct inotify_event *event, std::shared
         if (targetExisted || watcher->isIgnored(newEntryPath)) {
           watcher->mEvents.remove(entry.path, kind);
           if (!watcher->isIgnored(newEntryPath)) {
-            watcher->mEvents.create(newEntryPath, kind);
+            if (sub->tree->find(newEntryPath).has_value()) {
+              watcher->mEvents.update(newEntryPath, kind);
+            } else {
+              watcher->mEvents.create(newEntryPath, kind);
+            }
           }
         } else {
           watcher->mEvents.rename(
@@ -533,7 +537,11 @@ bool InotifyBackend::handleSubscription(struct inotify_event *event, std::shared
       return false;
     }
     if (!isMoveWithinRoot) {
-      watcher->mEvents.create(path, entryKind(S_ISDIR(st.st_mode)));
+      if (sub->tree->find(path).has_value()) {
+        watcher->mEvents.update(path, entryKind(S_ISDIR(st.st_mode)));
+      } else {
+        watcher->mEvents.create(path, entryKind(S_ISDIR(st.st_mode)));
+      }
     } else if (missingSource) {
       watcher->mEvents.rename(
         oldPath,
