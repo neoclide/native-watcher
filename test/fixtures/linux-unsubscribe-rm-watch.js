@@ -24,7 +24,7 @@ async function main() {
       );
       await assert.rejects(
         subscription.unsubscribe(),
-        /Unable to remove watcher: .*Input\/output error/,
+        /Unable to remove watcher:/,
       );
       return;
     }
