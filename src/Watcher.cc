@@ -47,6 +47,14 @@ WatcherRef Watcher::getShared(std::string dir, std::unordered_set<std::string> i
 
   watcher->mSharedReservations.fetch_add(1);
   getSharedWatchers().insert(watcher);
+  try {
+    watcher->mDebounce->add(watcher.get(), [watcher] () {
+      watcher->triggerCallbacks();
+    });
+  } catch (...) {
+    getSharedWatchers().erase(watcher);
+    throw;
+  }
   return watcher;
 }
 
@@ -112,9 +120,6 @@ Watcher::Watcher(std::string dir, std::unordered_set<std::string> ignorePaths, s
     mIgnorePaths(ignorePaths),
     mIgnoreGlobs(ignoreGlobs) {
       mDebounce = Debounce::getShared();
-      mDebounce->add(this, [this] () {
-        triggerCallbacks();
-      });
     }
 
 Watcher::~Watcher() {
@@ -364,6 +369,9 @@ void Watcher::unref() {
   std::unique_lock<std::mutex> registryLock(getSharedWatchersMutex());
   std::unique_lock<std::mutex> lock(mMutex);
   if (mCallbacks.empty() && mSharedReservations.load() == 0) {
+    lock.unlock();
+    // Release the Debounce callback's shared ownership before the registry's.
+    mDebounce->remove(this);
     removeSharedLocked(this);
   }
 }
