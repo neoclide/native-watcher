@@ -4,6 +4,7 @@
 #include <string>
 #include <unordered_map>
 #include <memory>
+#include <optional>
 #include "Event.hh"
 
 #ifdef _WIN32
@@ -31,9 +32,9 @@ public:
   static std::shared_ptr<DirTree> getCached(std::string root);
   DirTree(std::string root) : root(root), isComplete(false) {}
   DirTree(std::string root, FILE *f);
-  DirEntry *add(std::string path, uint64_t mtime, bool isDir);
-  DirEntry *find(std::string path);
-  DirEntry *update(std::string path, uint64_t mtime);
+  void add(std::string path, uint64_t mtime, bool isDir);
+  std::optional<DirEntry> find(std::string path);
+  bool update(std::string path, uint64_t mtime);
   std::vector<DirEntry> extract(std::string path);
   void restore(std::vector<DirEntry> entries, std::string oldPath, std::string newPath);
   void rename(std::string oldPath, std::string newPath);

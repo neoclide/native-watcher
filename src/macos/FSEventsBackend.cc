@@ -137,7 +137,7 @@ void recordCreatedPath(
     previous->mtime != entry.mtime;
   state->identities.add(path, entry);
   if (!sameIdentity) state->tree->remove(path);
-  if (state->tree->update(path, entry.mtime) == nullptr) {
+  if (!state->tree->update(path, entry.mtime)) {
     state->tree->add(path, entry.mtime, entry.isDirectory);
   }
   // Created flags can recur after the first create was delivered. Classify
@@ -523,8 +523,8 @@ void processEvents(
         state->identities.find(event.path);
       bool sameIdentity = previousIdentity != nullptr &&
         previousIdentity->identity == indexed->identity;
-      DirEntry *entry = state->tree->find(event.path);
-      if (previousIdentity == nullptr || entry == nullptr) {
+      auto entry = state->tree->find(event.path);
+      if (previousIdentity == nullptr || !entry) {
         try {
           addCreatedPath(watcher, state, list, event.path);
         } catch (const std::exception &error) {
@@ -538,9 +538,7 @@ void processEvents(
       }
 
       state->identities.add(event.path, *indexed);
-      if (entry) {
-        entry->mtime = indexed->mtime;
-      } else {
+      if (!state->tree->update(event.path, indexed->mtime)) {
         state->tree->add(
           event.path,
           indexed->mtime,
@@ -560,7 +558,7 @@ void processEvents(
         state->identities.find(event.path);
       bool sameIdentity = previousIdentity != nullptr &&
         previousIdentity->identity == indexed->identity;
-      DirEntry *entry = state->tree->find(event.path);
+      auto entry = state->tree->find(event.path);
       if (!hasMetadataChange && entry && sameIdentity && entry->mtime == indexed->mtime &&
           indexed->mtime % 1000000000 != 0) {
         continue;
@@ -568,7 +566,9 @@ void processEvents(
 
       if ((isModified || sameIdentity) && entry) {
         state->identities.add(event.path, *indexed);
-        state->tree->update(event.path, indexed->mtime);
+        if (!state->tree->update(event.path, indexed->mtime)) {
+          state->tree->add(event.path, indexed->mtime, indexed->isDirectory);
+        }
         list.update(event.path, entryKind(indexed->isDirectory));
       } else if (!sameIdentity && indexed->isDirectory) {
         try {

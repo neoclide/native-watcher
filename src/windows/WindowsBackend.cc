@@ -338,7 +338,7 @@ public:
         // The paired notification still provides enough information to move
         // the known tree; attributes only refresh its current root entry.
         if (mPendingRenamePath.has_value()) {
-          bool targetExisted = mTree->find(path) != nullptr ||
+          bool targetExisted = mTree->find(path).has_value() ||
             mRemovedPaths.erase(path) > 0 ||
             mPreviousRemovedPaths.erase(path) > 0;
           std::string oldPath = *mPendingRenamePath;
@@ -373,7 +373,7 @@ public:
             mTree->restore(std::move(visible), oldPath, path);
           }
           if (hasAttributes && supported &&
-              mTree->update(path, CONVERT_TIME(data.ftLastWriteTime)) == nullptr) {
+              !mTree->update(path, CONVERT_TIME(data.ftLastWriteTime))) {
             mTree->add(
               path,
               CONVERT_TIME(data.ftLastWriteTime),
@@ -400,7 +400,7 @@ public:
         if (GetFileAttributesExW(utf8ToUtf16(path).data(), GetFileExInfoStandard, &data) &&
             !(data.dwFileAttributes &
               (FILE_ATTRIBUTE_REPARSE_POINT | FILE_ATTRIBUTE_DEVICE)) &&
-            mTree->find(path) != nullptr) {
+            mTree->find(path)) {
           mTree->update(path, CONVERT_TIME(data.ftLastWriteTime));
           if (!(data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) {
             mWatcher->mEvents.update(path, EntryKind::File);
@@ -459,7 +459,7 @@ public:
           (FILE_ATTRIBUTE_REPARSE_POINT | FILE_ATTRIBUTE_DEVICE)) continue;
 
       bool isDirectory = data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY;
-      if (mTree->find(candidate) == nullptr) {
+      if (!mTree->find(candidate)) {
         mWatcher->mEvents.create(candidate, entryKind(isDirectory));
         mTree->add(candidate, CONVERT_TIME(data.ftLastWriteTime), isDirectory);
       }

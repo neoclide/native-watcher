@@ -66,28 +66,27 @@ DirEntry *DirTree::_find(std::string path) {
   return &found->second;
 }
 
-DirEntry *DirTree::add(std::string path, uint64_t mtime, bool isDir) {
+void DirTree::add(std::string path, uint64_t mtime, bool isDir) {
   std::lock_guard<std::mutex> lock(mDirCacheMutex());
 
   DirEntry entry(path, mtime, isDir);
-  auto it = entries.emplace(entry.path, entry);
-  return &it.first->second;
+  entries.emplace(entry.path, entry);
 }
 
-DirEntry *DirTree::find(std::string path) {
+std::optional<DirEntry> DirTree::find(std::string path) {
   std::lock_guard<std::mutex> lock(mDirCacheMutex());
-  return _find(path);
+  DirEntry *found = _find(path);
+  if (found == nullptr) return std::nullopt;
+  return *found;
 }
 
-DirEntry *DirTree::update(std::string path, uint64_t mtime) {
+bool DirTree::update(std::string path, uint64_t mtime) {
   std::lock_guard<std::mutex> lock(mDirCacheMutex());
 
   DirEntry *found = _find(path);
-  if (found) {
-    found->mtime = mtime;
-  }
-
-  return found;
+  if (found == nullptr) return false;
+  found->mtime = mtime;
+  return true;
 }
 
 std::vector<DirEntry> DirTree::extract(std::string path) {

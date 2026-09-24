@@ -173,7 +173,7 @@ bool InotifyBackend::addCreatedTree(
   DIR *directory = opendir(path.c_str());
   if (directory == nullptr) return false;
 
-  if (tree->find(path) == nullptr) {
+  if (!tree->find(path)) {
     struct stat attributes;
     if (fstat(dirfd(directory), &attributes) != 0) {
       closedir(directory);
@@ -196,7 +196,7 @@ bool InotifyBackend::addCreatedTree(
       continue;
     }
     bool isDirectory = S_ISDIR(attributes.st_mode);
-    bool existed = tree->find(candidate) != nullptr;
+    bool existed = tree->find(candidate).has_value();
     if (!existed) {
       tree->add(candidate, CONVERT_TIME(attributes.st_mtim), isDirectory);
       if (reportEvents) {
@@ -349,7 +349,7 @@ void InotifyBackend::flushExpiredMoves() {
     // for its pair. Do not report the old entry's removal as a deletion of
     // the new one; its create event already describes the current path.
     for (const auto &entry : move.entries) {
-      if (move.tree->find(entry.path) == nullptr) {
+      if (!move.tree->find(entry.path)) {
         move.watcher->mEvents.remove(entry.path, entryKind(entry.isDir));
       }
     }
@@ -483,7 +483,7 @@ bool InotifyBackend::handleSubscription(struct inotify_event *event, std::shared
       oldPath = pending->second.path;
       move = &pending->second;
       suppressedEvents = move->suppressedEvents;
-      bool targetExisted = sub->tree->find(path) != nullptr;
+      bool targetExisted = sub->tree->find(path).has_value();
       for (const auto &entry : move->entries) {
         std::string newEntryPath = path + entry.path.substr(oldPath.size());
         EntryKind kind = entryKind(entry.isDir);
@@ -505,7 +505,7 @@ bool InotifyBackend::handleSubscription(struct inotify_event *event, std::shared
     }
 
     if (isMoveWithinRoot) {
-      if (sub->tree->find(path) != nullptr) {
+      if (sub->tree->find(path)) {
         sub->tree->remove(path);
       }
       missingSource = move->entries.empty();
@@ -533,18 +533,17 @@ bool InotifyBackend::handleSubscription(struct inotify_event *event, std::shared
         entryKind(S_ISDIR(st.st_mode))
       );
     }
-    DirEntry *entry;
+    bool isDirectory = S_ISDIR(st.st_mode);
     if (isMoveWithinRoot) {
-      entry = sub->tree->update(path, CONVERT_TIME(st.st_mtim));
-      if (entry == nullptr) {
-        entry = sub->tree->add(path, CONVERT_TIME(st.st_mtim), S_ISDIR(st.st_mode));
+      if (!sub->tree->update(path, CONVERT_TIME(st.st_mtim))) {
+        sub->tree->add(path, CONVERT_TIME(st.st_mtim), isDirectory);
         missingSource = true;
       }
     } else {
-      entry = sub->tree->add(path, CONVERT_TIME(st.st_mtim), S_ISDIR(st.st_mode));
+      sub->tree->add(path, CONVERT_TIME(st.st_mtim), isDirectory);
     }
 
-    if (entry != nullptr && entry->isDir) {
+    if (isDirectory) {
       // A move queued during the initial scan may have no indexed source or
       // directory watch to carry to its destination.
       bool rescanMovedTree = isMoveWithinRoot && (
@@ -582,7 +581,7 @@ bool InotifyBackend::handleSubscription(struct inotify_event *event, std::shared
         (!S_ISREG(st.st_mode) && !S_ISDIR(st.st_mode))) {
       return false;
     }
-    if (sub->tree->find(path) == nullptr) return false;
+    if (!sub->tree->find(path)) return false;
     watcher->mEvents.update(path, entryKind(S_ISDIR(st.st_mode)));
     sub->tree->update(path, CONVERT_TIME(st.st_mtim));
   } else if (event->mask & (IN_DELETE | IN_DELETE_SELF | IN_MOVED_FROM | IN_MOVE_SELF)) {

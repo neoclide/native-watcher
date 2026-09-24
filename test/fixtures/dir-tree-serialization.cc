@@ -16,17 +16,21 @@ int main() {
 
   DirTree restored("root", file);
   assert(restored.entries.size() == 4);
-  assert(restored.find("123_data") != nullptr);
+  assert(restored.find("123_data"));
   assert(restored.find("123_data")->mtime == 42);
   assert(!restored.find("123_data")->isDir);
-  assert(restored.find("plain") != nullptr);
+  assert(restored.find("plain"));
   assert(restored.find("plain")->mtime == 43);
   assert(restored.find("plain")->isDir);
-  assert(restored.find("9 dir/sub.txt") != nullptr);
+  assert(restored.find("9 dir/sub.txt"));
   assert(restored.find("9 dir/sub.txt")->mtime == 44);
   assert(!restored.find("9 dir/sub.txt")->isDir);
-  assert(restored.find("7:report.txt") != nullptr);
+  assert(restored.find("7:report.txt"));
   assert(restored.find("7:report.txt")->mtime == 45);
   assert(!restored.find("7:report.txt")->isDir);
+  auto snapshot = restored.find("123_data");
+  restored.remove("123_data");
+  assert(snapshot && snapshot->mtime == 42);
+  assert(!restored.find("123_data"));
   fclose(file);
 }
