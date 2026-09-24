@@ -1068,6 +1068,43 @@ test(
 );
 
 test(
+  'tracks files created during Windows startup scan',
+  {skip: process.platform !== 'win32'},
+  async () => {
+    const directory = await fs.mkdtemp(
+      path.join(os.tmpdir(), 'native-watcher-windows-scan-'),
+    );
+    const nested = path.join(directory, 'nested');
+    await fs.mkdir(nested);
+    for (let i = 0; i < 40; i++) {
+      await fs.writeFile(path.join(nested, `file-${i}.txt`), 'init');
+    }
+    const collector = new EventCollector();
+    const subscriptionPromise = watcher.subscribe(
+      directory,
+      collector.callback,
+    );
+    const createdFile = path.join(nested, 'created-during-scan.txt');
+    await fs.writeFile(createdFile, 'created');
+    const subscription = await subscriptionPromise;
+    try {
+      let mark = collector.mark();
+      let observed = collector.waitFor('update', createdFile, mark);
+      await fs.writeFile(createdFile, 'updated');
+      await observed;
+
+      mark = collector.mark();
+      observed = collector.waitFor('delete', createdFile, mark);
+      await fs.unlink(createdFile);
+      await observed;
+    } finally {
+      await subscription.unsubscribe();
+      await fs.rm(directory, {recursive: true, force: true});
+    }
+  },
+);
+
+test(
   'a FIFO event does not block other macOS subscriptions',
   {skip: process.platform !== 'darwin'},
   async () => {

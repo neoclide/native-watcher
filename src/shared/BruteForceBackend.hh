@@ -17,7 +17,6 @@ public:
   }
 
   std::shared_ptr<DirTree> getTree(WatcherRef watcher, bool shouldRead = true);
-private:
   void readTree(WatcherRef watcher, std::shared_ptr<DirTree> tree);
 };
 

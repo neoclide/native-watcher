@@ -138,8 +138,19 @@ public:
   void run() {
     try {
       poll();
+      mBackend->readTree(mWatcher, mTree);
+      mTree->isComplete = true;
       mStartSignal.notify();
     } catch (WatcherError &err) {
+      if (mPollPending) {
+        CancelIoEx(mDirectoryHandle, &mOverlapped);
+      }
+      mStartError = err.what();
+      mStartSignal.notify();
+    } catch (std::exception &err) {
+      if (mPollPending) {
+        CancelIoEx(mDirectoryHandle, &mOverlapped);
+      }
       mStartError = err.what();
       mStartSignal.notify();
     }
@@ -560,7 +571,7 @@ private:
 // This function is called by Backend::watch which takes a lock on mMutex
 void WindowsBackend::subscribe(WatcherRef watcher) {
   // Create a subscription for this watcher
-  auto sub = std::make_shared<Subscription>(this, watcher, getTree(watcher));
+  auto sub = std::make_shared<Subscription>(this, watcher, getTree(watcher, false));
   watcher->state = sub;
 
   // Queue polling for this subscription in the correct thread.
