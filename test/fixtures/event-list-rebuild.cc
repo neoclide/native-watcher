@@ -39,8 +39,46 @@ static void testTypeReplacement(bool fileToDirectory) {
   assert(deletedOldKind && createdNewKind);
 }
 
+static void testRenameRoundtripDelete() {
+  EventList events;
+  events.rename("/a", "/b", "rename-1", EntryKind::File);
+  events.rename("/b", "/a", "rename-2", EntryKind::File);
+  events.remove("/a", EntryKind::File);
+  EventBatch batch = events.drain();
+  assert(batch.events.size() == 1);
+  assert(batch.events[0].path == "/a");
+  assert(batch.events[0].isDeleted);
+  assert(!batch.events[0].isCreated);
+  assert(!batch.events[0].renameId.has_value());
+}
+
+static void testRenameRoundtripPreservesExisting() {
+  EventList events;
+  events.rename("/a", "/b", "rename-1", EntryKind::File);
+  events.rename("/b", "/a", "rename-2", EntryKind::File);
+  EventBatch batch = events.drain();
+  assert(batch.events.size() == 1);
+  assert(batch.events[0].path == "/a");
+  assert(!batch.events[0].isDeleted);
+  assert(!batch.events[0].isCreated);
+  assert(!batch.events[0].renameId.has_value());
+}
+
+static void testRenameRoundtripCreatedAndDeleted() {
+  EventList events;
+  events.create("/a", EntryKind::File);
+  events.rename("/a", "/b", "rename-1", EntryKind::File);
+  events.rename("/b", "/a", "rename-2", EntryKind::File);
+  events.remove("/a", EntryKind::File);
+  EventBatch batch = events.drain();
+  assert(batch.events.empty());
+}
+
 int main() {
   testRenameRebuild();
+  testRenameRoundtripDelete();
+  testRenameRoundtripPreservesExisting();
+  testRenameRoundtripCreatedAndDeleted();
   testTypeReplacement(true);
   testTypeReplacement(false);
   return 0;

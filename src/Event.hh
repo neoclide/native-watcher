@@ -80,9 +80,16 @@ public:
       auto originalRenameId = old->second.renameId;
       mEvents.erase(old);
       Event *created = internalUpdate(newPath, kind);
-      created->isCreated = true;
-      created->isDeleted = false;
-      created->renameId = originalRenameId;
+      if (created->isDeleted) {
+        // Match create(): replacing a path that was already deleted in this
+        // batch is an update, so there is no delete/create pair to correlate.
+        created->isDeleted = false;
+        created->renameId.reset();
+      } else {
+        created->isCreated = true;
+        created->isDeleted = false;
+        created->renameId = originalRenameId;
+      }
       return;
     }
 
