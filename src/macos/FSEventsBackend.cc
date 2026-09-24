@@ -16,25 +16,6 @@
 #define CONVERT_TIME(ts) ((uint64_t)ts.tv_sec * 1000000000 + ts.tv_nsec)
 #define IGNORED_FLAGS (kFSEventStreamEventFlagItemIsHardlink | kFSEventStreamEventFlagItemIsLastHardlink | kFSEventStreamEventFlagItemIsSymlink | kFSEventStreamEventFlagItemIsDir | kFSEventStreamEventFlagItemIsFile)
 
-void stopStream(FSEventStreamRef stream) {
-  if (stream == nullptr) {
-    return;
-  }
-  FSEventStreamStop(stream);
-  FSEventStreamInvalidate(stream);
-  FSEventStreamRelease(stream);
-}
-
-void stopStreamAfterCallback(FSEventStreamRef stream, dispatch_queue_t queue) {
-  dispatch_retain(queue);
-  dispatch_async(dispatch_get_global_queue(QOS_CLASS_DEFAULT, 0), ^{
-    // The stream's dispatch callback must return before it is released.
-    dispatch_sync(queue, ^ {});
-    stopStream(stream);
-    dispatch_release(queue);
-  });
-}
-
 void flushStreamCallbacks(
   FSEventStreamRef stream,
   dispatch_queue_t queue
@@ -43,11 +24,33 @@ void flushStreamCallbacks(
   dispatch_sync(queue, ^ {});
 }
 
+struct PendingEvent {
+  std::string path;
+  FSEventStreamEventFlags flags;
+  FSEventStreamEventId id;
+};
+
+class State: public WatcherState {
+public:
+  std::weak_ptr<FSEventsBackend> backend;
+  std::atomic<FSEventStreamRef> stream {nullptr};
+  dispatch_queue_t callbackQueue = nullptr;
+  Signal cleanupComplete;
+  std::shared_ptr<DirTree> tree;
+  IdentityIndex identities;
+  std::mutex initializationMutex;
+  std::vector<PendingEvent> pendingEvents;
+  uint64_t renameSequence = 0;
+  bool initializing = true;
+};
+
 struct WatcherContext {
   std::atomic<size_t> references {1};
   WatcherRef watcher;
+  std::shared_ptr<State> state;
 
-  explicit WatcherContext(WatcherRef watcher) : watcher(watcher) {}
+  WatcherContext(WatcherRef watcher, std::shared_ptr<State> state)
+    : watcher(watcher), state(std::move(state)) {}
 };
 
 const void *retainWatcherContext(const void *info) {
@@ -67,24 +70,22 @@ void releaseWatcherContext(const void *info) {
   }
 }
 
-struct PendingEvent {
-  std::string path;
-  FSEventStreamEventFlags flags;
-  FSEventStreamEventId id;
-};
-
-class State: public WatcherState {
-public:
-  std::weak_ptr<FSEventsBackend> backend;
-  std::atomic<FSEventStreamRef> stream {nullptr};
-  dispatch_queue_t callbackQueue = nullptr;
-  std::shared_ptr<DirTree> tree;
-  IdentityIndex identities;
-  std::mutex initializationMutex;
-  std::vector<PendingEvent> pendingEvents;
-  uint64_t renameSequence = 0;
-  bool initializing = true;
-};
+void stopStreamAfterCallback(
+  std::shared_ptr<State> state,
+  FSEventStreamRef stream
+) {
+  dispatch_queue_t queue = state->callbackQueue;
+  dispatch_retain(queue);
+  dispatch_async(dispatch_get_global_queue(QOS_CLASS_DEFAULT, 0), ^{
+    FSEventStreamStop(stream);
+    FSEventStreamInvalidate(stream);
+    // Stop and invalidate do not wait for a callback already on this queue.
+    dispatch_sync(queue, ^ {});
+    FSEventStreamRelease(stream);
+    state->cleanupComplete.notify();
+    dispatch_release(queue);
+  });
+}
 
 bool hasFlag(FSEventStreamEventFlags flags, FSEventStreamEventFlags flag) {
   return (flags & flag) == flag;
@@ -420,14 +421,11 @@ void reconcileFullTree(WatcherRef watcher, State *state) {
 }
 
 void processEvents(
-  ConstFSEventStreamRef streamRef,
   WatcherRef watcher,
+  const std::shared_ptr<State> &stateGuard,
   const std::vector<PendingEvent> &events
 ) {
-  if (watcher->state == nullptr) return;
-
-  auto stateGuard = watcher->state;
-  auto *state = static_cast<State *>(stateGuard.get());
+  State *state = stateGuard.get();
   EventList &list = watcher->mEvents;
   bool deletedRoot = false;
 
@@ -593,8 +591,7 @@ void processEvents(
     auto stream = state->stream.exchange(nullptr);
     if (stream != nullptr) {
       watcher->mNeedsResubscribe = true;
-      watcher->state = nullptr;
-      stopStreamAfterCallback(stream, state->callbackQueue);
+      stopStreamAfterCallback(stateGuard, stream);
     }
   }
 }
@@ -610,9 +607,8 @@ void FSEventsCallback(
   char **paths = (char **)eventPaths;
   auto *context = static_cast<WatcherContext *>(clientCallBackInfo);
   WatcherRef &watcher = context->watcher;
-  auto stateGuard = watcher->state;
-  if (stateGuard == nullptr) return;
-  auto *state = static_cast<State *>(stateGuard.get());
+  const auto &stateGuard = context->state;
+  auto *state = stateGuard.get();
   if (state->stream.load() != streamRef) return;
 
   try {
@@ -634,7 +630,7 @@ void FSEventsCallback(
       }
     }
 
-    processEvents(streamRef, watcher, events);
+    processEvents(watcher, stateGuard, events);
   } catch (std::exception &err) {
     if (state != nullptr) {
       auto backend = state->backend.lock();
@@ -659,8 +655,8 @@ void checkWatcher(WatcherRef watcher) {
 void FSEventsBackend::startStream(WatcherRef watcher, FSEventStreamEventId id) {
   checkWatcher(watcher);
 
-  auto stateGuard = watcher->state;
-  State *state = static_cast<State *>(stateGuard.get());
+  auto stateGuard = std::static_pointer_cast<State>(watcher->state);
+  State *state = stateGuard.get();
   state->tree = std::make_shared<DirTree>(watcher->mDir);
 
   CFAbsoluteTime latency = 0.001;
@@ -678,7 +674,7 @@ void FSEventsBackend::startStream(WatcherRef watcher, FSEventStreamEventId id) {
   );
 
   // FSEvents retains this context and releases it with the stream.
-  auto *callbackWatcher = new WatcherContext(watcher);
+  auto *callbackWatcher = new WatcherContext(watcher, stateGuard);
   FSEventStreamContext callbackInfo {
     0,
     callbackWatcher,
@@ -734,7 +730,6 @@ void FSEventsBackend::startStream(WatcherRef watcher, FSEventStreamEventId id) {
     state->stream = nullptr;
     throw WatcherError("Error starting FSEvents stream", watcher);
   }
-
   IdentityIndex identities = scanIdentityIndex(
     watcher->mDir,
     [watcher](const std::string &path) {
@@ -754,7 +749,7 @@ void FSEventsBackend::startStream(WatcherRef watcher, FSEventStreamEventId id) {
   // recorded paths may already be stale after a rename chain, so reconcile
   // against the current filesystem until a scan completes without receiving
   // another event batch.
-  while (watcher->state != nullptr) {
+  while (state->stream.load() == stream) {
     flushStreamCallbacks(stream, mQueue);
     {
       std::lock_guard<std::mutex> lock(state->initializationMutex);
@@ -797,7 +792,9 @@ FSEventsBackend::~FSEventsBackend() {
 void FSEventsBackend::cleanupAfterError() {
   for (const auto &watcher : mSubscriptions) {
     auto state = std::static_pointer_cast<State>(watcher->state);
-    if (state != nullptr && state->backend.lock().get() == this) unsubscribe(watcher);
+    if (state != nullptr && state->backend.lock().get() == this) {
+      unsubscribe(watcher);
+    }
   }
 }
 
@@ -816,7 +813,10 @@ void FSEventsBackend::subscribe(WatcherRef watcher) {
   try {
     startStream(watcher, kFSEventStreamEventIdSinceNow);
   } catch (...) {
-    stopStream(s->stream.exchange(nullptr));
+    auto stream = s->stream.exchange(nullptr);
+    if (stream != nullptr) {
+      stopStreamAfterCallback(s, stream);
+    }
     watcher->state = nullptr;
     throw;
   }
@@ -825,9 +825,25 @@ void FSEventsBackend::subscribe(WatcherRef watcher) {
 // This function is called by Backend::unwatch which takes a lock on mMutex
 void FSEventsBackend::unsubscribe(WatcherRef watcher) {
   auto stateGuard = watcher->state;
-  State* s = static_cast<State*>(stateGuard.get());
-  if (s != nullptr) {
-    stopStream(s->stream.exchange(nullptr));
+  auto state = std::static_pointer_cast<State>(stateGuard);
+  if (state != nullptr) {
+    auto stream = state->stream.exchange(nullptr);
+    if (stream != nullptr) {
+      stopStreamAfterCallback(state, stream);
+    }
+  }
+}
+
+void FSEventsBackend::finishUnsubscribe(
+  WatcherRef watcher,
+  std::shared_ptr<WatcherState> stateGuard
+) {
+  auto state = std::static_pointer_cast<State>(stateGuard);
+  if (state == nullptr) return;
+
+  state->cleanupComplete.wait();
+  std::unique_lock<std::mutex> lock(mMutex);
+  if (watcher->state == stateGuard) {
     watcher->state = nullptr;
   }
 }

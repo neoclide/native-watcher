@@ -12,6 +12,10 @@ public:
   ~FSEventsBackend();
   void subscribe(WatcherRef watcher) override;
   void unsubscribe(WatcherRef watcher) override;
+  void finishUnsubscribe(
+    WatcherRef watcher,
+    std::shared_ptr<WatcherState> state
+  ) override;
   void cleanupAfterError() override;
   void handleBackendError(std::exception &err);
 private:
