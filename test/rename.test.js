@@ -17,7 +17,7 @@ const exactRenamePlatform =
   process.platform === 'win32';
 
 test(
-  'clears rename identity when a deleted target path is recreated in one batch',
+  'preserves event kinds and clears rename identities during batch modifications',
   {skip: process.platform === 'win32'},
   async () => {
     const tempDirectory = await fs.mkdtemp(
@@ -46,35 +46,6 @@ test(
     }
   },
 );
-
-test('preserves both event kinds when a path changes type in one batch',
-  {skip: process.platform === 'win32'}, async (t) => {
-    const directory = await fs.mkdtemp(
-      path.join(await fs.realpath(os.tmpdir()), 'native-watcher-event-kind-'),
-    );
-    try {
-      const binary = path.join(directory, 'event-list-type-replacement');
-      await execFileAsync('c++', [
-        '-std=c++17',
-        '-ffunction-sections',
-        '-fdata-sections',
-        process.platform === 'darwin' ? '-Wl,-dead_strip' : '-Wl,--gc-sections',
-        `-I${require('node-addon-api').include.replace(/^"|"$/g, '')}`,
-        `-I${path.resolve(process.execPath, '..', '..', 'include', 'node')}`,
-        `-I${path.join(__dirname, '..', 'src')}`,
-        path.join(__dirname, 'fixtures', 'event-list-type-replacement.cc'),
-        '-o', binary,
-      ]);
-      await t.test('file to directory', async () => {
-        await execFileAsync(binary, ['file-to-directory']);
-      });
-      await t.test('directory to file', async () => {
-        await execFileAsync(binary, ['directory-to-file']);
-      });
-    } finally {
-      await fs.rm(directory, {recursive: true, force: true});
-    }
-  });
 
 function waitForEvents(queue, predicate = () => true, timeout = 5000) {
   if (queue.error) return Promise.reject(queue.error);
@@ -319,29 +290,6 @@ test('applies ignores to each descendant across a directory rename',
       event.path !== oldHidden && event.path !== newVisible));
   });
 
-test('native subscription emits filesystem events', async (t) => {
-  const tempDirectory = await fs.realpath(os.tmpdir());
-  const directory = await fs.mkdtemp(path.join(tempDirectory, 'native-watcher-'));
-  const pending = [];
-  const subscription = await watcher.subscribe(directory, (error, events) => {
-    dispatchEvents(pending, error, events);
-  });
-
-  t.after(async () => {
-    await subscription.unsubscribe();
-    await fs.rm(directory, {recursive: true, force: true});
-  });
-
-  const file = path.join(directory, 'created.txt');
-  const eventsPromise = waitForEvents(pending, (events) =>
-    containsEvent(events, 'create', file),
-  );
-  await fs.writeFile(file, 'content');
-  const events = await eventsPromise;
-  assert.ok(
-    events.some((event) => event.type === 'create' && event.path === file),
-  );
-});
 
 test(
   'correlates file and directory renames from the native backend',

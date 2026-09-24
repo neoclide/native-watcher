@@ -68,51 +68,53 @@ test('reports an atomic replacement of an existing file as update on macOS',
     `replacement reported as create: ${JSON.stringify(events)}`);
   });
 
-for (const [name, prepare, createReplacement, oldKind, newKind] of [
-  [
-    'file to directory',
-    (target) => fs.writeFile(target, 'before'),
-    (target) => fsSync.mkdirSync(target),
-    'file',
-    'directory',
-  ],
-  [
-    'directory to file',
-    (target) => fs.mkdir(target),
-    (target) => fsSync.writeFileSync(target, 'after'),
-    'directory',
-    'file',
-  ],
-]) {
-  test(`reports delete and create for a rapid ${name} replacement`,
-    {skip: process.platform !== 'darwin' && process.platform !== 'linux'},
-    async (t) => {
-      let target;
-      const {directory, collector} = await createFixture(t, undefined, async (root) => {
-        target = path.join(root, 'target');
-        await prepare(target);
-      });
-      const moved = `${directory}-moved-target`;
-      t.after(() => fs.rm(moved, {recursive: true, force: true}));
-
-      // Ensure the startup scan and any queued startup events are delivered.
-      const barrier = path.join(directory, 'barrier');
-      const ready = collector.waitFor('create', barrier);
-      await fs.writeFile(barrier, 'ready');
-      await ready;
-
-      const mark = collector.mark();
-      const replacement = collector.waitFrom(mark, (events) =>
-        events.some((event) => event.path === target &&
-          event.type === 'delete' && event.kind === oldKind) &&
-        events.some((event) => event.path === target &&
-          event.type === 'create' && event.kind === newKind),
-      );
-      fsSync.renameSync(target, moved);
-      createReplacement(target);
-      await replacement;
+test(
+  'reports delete and create for rapid type replacements',
+  {skip: process.platform !== 'darwin' && process.platform !== 'linux'},
+  async (t) => {
+    let fileTarget;
+    let dirTarget;
+    const {directory, collector} = await createFixture(t, undefined, async (root) => {
+      fileTarget = path.join(root, 'file-target');
+      dirTarget = path.join(root, 'dir-target');
+      await fs.writeFile(fileTarget, 'before');
+      await fs.mkdir(dirTarget);
     });
-}
+    const moved = `${directory}-moved-target`;
+    await fs.mkdir(moved);
+    t.after(() => fs.rm(moved, {recursive: true, force: true}));
+
+    // Ensure the startup scan and any queued startup events are delivered.
+    const barrier = path.join(directory, 'barrier');
+    const ready = collector.waitFor('create', barrier);
+    await fs.writeFile(barrier, 'ready');
+    await ready;
+
+    // file to directory
+    let mark = collector.mark();
+    let replacement = collector.waitFrom(mark, (events) =>
+      events.some((event) => event.path === fileTarget &&
+        event.type === 'delete' && event.kind === 'file') &&
+      events.some((event) => event.path === fileTarget &&
+        event.type === 'create' && event.kind === 'directory'),
+    );
+    fsSync.renameSync(fileTarget, path.join(moved, 'file-moved'));
+    fsSync.mkdirSync(fileTarget);
+    await replacement;
+
+    // directory to file
+    mark = collector.mark();
+    replacement = collector.waitFrom(mark, (events) =>
+      events.some((event) => event.path === dirTarget &&
+        event.type === 'delete' && event.kind === 'directory') &&
+      events.some((event) => event.path === dirTarget &&
+        event.type === 'create' && event.kind === 'file'),
+    );
+    fsSync.renameSync(dirTarget, path.join(moved, 'dir-moved'));
+    fsSync.writeFileSync(dirTarget, 'after');
+    await replacement;
+  },
+);
 
 test('rapid file changes do not leave a stale final event state', async (t) => {
   const {directory, collector} = await createFixture(t);
@@ -1408,7 +1410,7 @@ test('keeps different ignore options separate for the same directory', async (t)
   );
 });
 
-test('rejects a missing path and a file path', async (t) => {
+test('rejects invalid subscription arguments and options', async (t) => {
   const tempDirectory = await fs.realpath(os.tmpdir());
   const directory = await fs.mkdtemp(
     path.join(tempDirectory, 'native-watcher-errors-'),
@@ -1426,49 +1428,31 @@ test('rejects a missing path and a file path', async (t) => {
   const file = path.join(directory, 'file.txt');
   await fs.writeFile(file, 'content');
   await assert.rejects(watcher.subscribe(file, () => {}));
-});
 
-test('rejects a non-function callback', async (t) => {
-  const {directory} = await createFixture(t);
   await assert.rejects(
     watcher.subscribe(directory, null),
     {name: 'TypeError', message: 'Expected a function'},
   );
-});
 
-async function assertIgnored(t, options, ignoredRelativePath, mutateIgnored) {
-  const {directory, collector} = await createFixture(t, options);
-  const ignoredPath = path.join(directory, ignoredRelativePath);
-  const visiblePath = path.join(directory, 'visible.txt');
-  const mark = collector.mark();
-
-  await mutateIgnored(ignoredPath);
-  const visible = collector.waitFor('create', visiblePath, mark);
-  await fs.writeFile(visiblePath, 'visible');
-  await visible;
-  await settle();
-
-  const events = collector.events.slice(mark);
-  assertEvent(events, 'create', visiblePath);
-  assertNoPath(events, ignoredPath);
-}
-
-test('ignore accepts a relative file path', async (t) => {
-  await assertIgnored(t, {ignore: ['ignored.txt']}, 'ignored.txt', (file) =>
-    fs.writeFile(file, 'ignored'),
+  await assert.rejects(
+    watcher.subscribe(directory, callback, {ignore: [/ignored/i]}),
+    /cannot use flags/,
   );
 });
 
-test('ignore accepts an absolute file path', async (t) => {
-  let absolutePath;
+test('ignore accepts relative and absolute file paths', async (t) => {
   const tempDirectory = await fs.realpath(os.tmpdir());
   const directory = await fs.mkdtemp(
     path.join(tempDirectory, 'native-watcher-ignore-'),
   );
-  absolutePath = path.join(directory, 'ignored.txt');
+  const absolutePath = path.join(directory, 'ignored-abs.txt');
+  const relativeFile = 'ignored-rel.txt';
+  const relativePath = path.join(directory, relativeFile);
+  const visiblePath = path.join(directory, 'visible.txt');
+
   const collector = new EventCollector();
   const subscription = await watcher.subscribe(directory, collector.callback, {
-    ignore: [absolutePath],
+    ignore: [relativeFile, absolutePath],
   });
   t.after(async () => {
     await subscription.unsubscribe();
@@ -1476,42 +1460,47 @@ test('ignore accepts an absolute file path', async (t) => {
   });
 
   const mark = collector.mark();
+  await fs.writeFile(relativePath, 'ignored');
   await fs.writeFile(absolutePath, 'ignored');
-  const visiblePath = path.join(directory, 'visible.txt');
+  const visible = collector.waitFor('create', visiblePath, mark);
   await fs.writeFile(visiblePath, 'visible');
-  await collector.waitFor('create', visiblePath, mark);
+  const events = await visible;
   await settle();
+
+  assertEvent(events, 'create', visiblePath);
+  assertNoPath(collector.events.slice(mark), relativePath);
   assertNoPath(collector.events.slice(mark), absolutePath);
 });
 
-test('ignoring a directory also ignores its descendants', async (t) => {
-  await assertIgnored(t, {ignore: ['ignored']}, 'ignored', async (directory) => {
-    await fs.mkdir(path.join(directory, 'nested'), {recursive: true});
-    await fs.writeFile(path.join(directory, 'nested', 'file.txt'), 'ignored');
-  });
-});
-
-test('an ignored directory present at startup is not watched', async (t) => {
-  let ignoredDirectory;
-  let ignoredFile;
+test('ignoring a directory ignores existing and newly created descendants', async (t) => {
+  let existingIgnoredDir;
+  let existingIgnoredFile;
   const {directory, collector} = await createFixture(
     t,
-    {ignore: ['ignored']},
+    {ignore: ['existing-ignored', 'new-ignored']},
     async (root) => {
-      ignoredDirectory = path.join(root, 'ignored');
-      ignoredFile = path.join(ignoredDirectory, 'file.txt');
-      await fs.mkdir(ignoredDirectory);
-      await fs.writeFile(ignoredFile, 'one');
+      existingIgnoredDir = path.join(root, 'existing-ignored');
+      existingIgnoredFile = path.join(existingIgnoredDir, 'file.txt');
+      await fs.mkdir(existingIgnoredDir);
+      await fs.writeFile(existingIgnoredFile, 'one');
     },
   );
+  const newIgnoredDir = path.join(directory, 'new-ignored');
+  const newIgnoredFile = path.join(newIgnoredDir, 'nested', 'file.txt');
   const visible = path.join(directory, 'visible.txt');
+
   const mark = collector.mark();
-  await fs.writeFile(ignoredFile, 'two');
+  await fs.writeFile(existingIgnoredFile, 'two');
+  await fs.mkdir(path.dirname(newIgnoredFile), {recursive: true});
+  await fs.writeFile(newIgnoredFile, 'new');
+
   const waiting = collector.waitFor('create', visible, mark);
   await fs.writeFile(visible, 'visible');
   await waiting;
   await settle();
-  assertNoPath(collector.events.slice(mark), ignoredDirectory);
+
+  assertNoPath(collector.events.slice(mark), existingIgnoredDir);
+  assertNoPath(collector.events.slice(mark), newIgnoredDir);
 });
 
 test(
@@ -1598,18 +1587,6 @@ test('ignore accepts RegExp patterns', async (t) => {
   assertEvent(events, 'create', visible);
 });
 
-test('ignore rejects RegExp flags', async (t) => {
-  const tempDirectory = await fs.realpath(os.tmpdir());
-  const directory = await fs.mkdtemp(
-    path.join(tempDirectory, 'native-watcher-options-'),
-  );
-  t.after(() => fs.rm(directory, {recursive: true, force: true}));
-
-  await assert.rejects(
-    watcher.subscribe(directory, () => {}, {ignore: [/ignored/i]}),
-    /cannot use flags/,
-  );
-});
 
 test('invalid native RegExp syntax does not leave a subscription running', async () => {
   const fixture = path.join(
