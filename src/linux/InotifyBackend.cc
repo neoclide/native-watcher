@@ -458,10 +458,13 @@ bool InotifyBackend::handleSubscription(struct inotify_event *event, std::shared
 
   for (auto &pending : pendingMoves) {
     auto &move = pending.second;
-    if (move.watcher.get() == watcher.get() && move.isDirectory &&
-        isPathOrDescendant(sub->path, move.path)) {
-      move.suppressedEvents = true;
-      return false;
+    if (move.watcher.get() == watcher.get() && move.isDirectory) {
+      for (const auto &movingSub : move.subscriptions) {
+        if (movingSub == sub) {
+          move.suppressedEvents = true;
+          return false;
+        }
+      }
     }
   }
 
