@@ -16,6 +16,12 @@
 #define CONVERT_TIME(ts) ((uint64_t)ts.tv_sec * 1000000000 + ts.tv_nsec)
 #define IGNORED_FLAGS (kFSEventStreamEventFlagItemIsHardlink | kFSEventStreamEventFlagItemIsLastHardlink | kFSEventStreamEventFlagItemIsSymlink | kFSEventStreamEventFlagItemIsDir | kFSEventStreamEventFlagItemIsFile)
 
+constexpr FSEventStreamEventFlags METADATA_FLAGS =
+  kFSEventStreamEventFlagItemInodeMetaMod |
+  kFSEventStreamEventFlagItemFinderInfoMod |
+  kFSEventStreamEventFlagItemChangeOwner |
+  kFSEventStreamEventFlagItemXattrMod;
+
 void flushStreamCallbacks(
   FSEventStreamRef stream,
   dispatch_queue_t queue
@@ -491,6 +497,15 @@ void processEvents(
   if (requiresRescan) {
     try {
       reconcileFullTree(watcher, state);
+      // Metadata changes need not alter mtime. Preserve their explicit flags
+      // for paths still present in the filtered index after reconciliation.
+      for (const auto &event : events) {
+        if ((event.flags & METADATA_FLAGS) == 0) continue;
+        const IndexedPath *entry = state->identities.find(event.path);
+        if (entry != nullptr) {
+          list.update(event.path, entryKind(entry->isDirectory));
+        }
+      }
     } catch (const std::exception &error) {
       list.error(error.what());
     }
@@ -503,17 +518,11 @@ void processEvents(
   for (const auto &event : events) {
     bool isCreated = hasFlag(event.flags, kFSEventStreamEventFlagItemCreated);
     bool isRemoved = hasFlag(event.flags, kFSEventStreamEventFlagItemRemoved);
+    bool hasMetadataChange =
+      (event.flags & METADATA_FLAGS) != 0;
     bool isModified =
       hasFlag(event.flags, kFSEventStreamEventFlagItemModified) ||
-      hasFlag(event.flags, kFSEventStreamEventFlagItemInodeMetaMod) ||
-      hasFlag(event.flags, kFSEventStreamEventFlagItemFinderInfoMod) ||
-      hasFlag(event.flags, kFSEventStreamEventFlagItemChangeOwner) ||
-      hasFlag(event.flags, kFSEventStreamEventFlagItemXattrMod);
-    bool hasMetadataChange =
-      hasFlag(event.flags, kFSEventStreamEventFlagItemInodeMetaMod) ||
-      hasFlag(event.flags, kFSEventStreamEventFlagItemFinderInfoMod) ||
-      hasFlag(event.flags, kFSEventStreamEventFlagItemChangeOwner) ||
-      hasFlag(event.flags, kFSEventStreamEventFlagItemXattrMod);
+      hasMetadataChange;
     bool isRenamed = hasFlag(event.flags, kFSEventStreamEventFlagItemRenamed);
     bool isDone = hasFlag(event.flags, kFSEventStreamEventFlagHistoryDone);
 

@@ -8,7 +8,7 @@ const {execFile} = require('node:child_process');
 const {promisify} = require('node:util');
 const execFileAsync = promisify(execFile);
 
-test('reindexes macOS file and directory replacements for merged flags',
+test('reindexes macOS replacements and preserves metadata updates during rescans',
   {skip: process.platform !== 'darwin', timeout: 30_000}, async () => {
     const directory = await fs.mkdtemp(path.join(
       await fs.realpath(os.tmpdir()), 'native-watcher-type-replacement-',

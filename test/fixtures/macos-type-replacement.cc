@@ -156,6 +156,61 @@ void runAtomicReplacement(
   assert(indexed->identity == current->identity);
 }
 
+void runMetadataRescan(
+  WatcherRef watcher,
+  const std::string &root,
+  FSEventStreamEventFlags metadataFlag,
+  bool directoryRename
+) {
+  std::string target = root + "/metadata.txt";
+  std::string removed = root + "/removed.txt";
+  std::string oldDirectory = root + "/before";
+  std::string newDirectory = root + "/after";
+  std::filesystem::remove_all(newDirectory);
+  std::filesystem::create_directory(oldDirectory);
+  writeFile(oldDirectory + "/child.txt", "child");
+  writeFile(target, "metadata");
+  writeFile(removed, "removed");
+  assert(chmod(target.c_str(), 0600) == 0);
+  auto state = indexDirectory(root);
+  assert(chmod(target.c_str(), 0640) == 0);
+  assert(readIndexedPath(target)->mtime == state->identities.find(target)->mtime);
+  std::filesystem::remove(removed);
+  std::vector<PendingEvent> events {
+    {target, metadataFlag, 20},
+    {removed, metadataFlag | kFSEventStreamEventFlagItemRemoved, 21}
+  };
+  if (directoryRename) {
+    std::filesystem::rename(oldDirectory, newDirectory);
+    events.push_back({oldDirectory,
+      kFSEventStreamEventFlagItemRenamed | kFSEventStreamEventFlagItemIsDir |
+        metadataFlag, 22});
+    events.push_back({newDirectory,
+      kFSEventStreamEventFlagItemRenamed | kFSEventStreamEventFlagItemIsDir |
+        metadataFlag, 23});
+    events.push_back({newDirectory + "/child.txt", metadataFlag, 24});
+  } else {
+    events.push_back({root, kFSEventStreamEventFlagMustScanSubDirs, 22});
+  }
+  processEvents(watcher, state, events);
+  auto batch = watcher->mEvents.drain();
+  assert(batch.error.empty());
+  assertEvent(batch, target, false, false, EntryKind::File);
+  assertEvent(batch, removed, false, true, EntryKind::File);
+  assert(batch.events.size() == (directoryRename ? 6 : 2));
+  if (directoryRename) {
+    assertEvent(batch, oldDirectory, false, true, EntryKind::Directory);
+    assertEvent(batch, newDirectory, true, false, EntryKind::Directory);
+    assertEvent(batch, oldDirectory + "/child.txt", false, true, EntryKind::File);
+    assertEvent(batch, newDirectory + "/child.txt", true, false, EntryKind::File);
+    for (const auto &event : batch.events) {
+      if (event.path != target && event.path != removed) {
+        assert(event.renameId.has_value());
+      }
+    }
+  }
+}
+
 int main(int argc, char **argv) {
   assert(argc == 2);
   std::string root(argv[1]);
@@ -194,5 +249,14 @@ int main(int argc, char **argv) {
   };
   for (size_t index = 0; index < std::size(atomicFlags); ++index) {
     runAtomicReplacement(watcher, root, atomicFlags[index], index);
+  }
+  for (auto flag : {
+    kFSEventStreamEventFlagItemInodeMetaMod,
+    kFSEventStreamEventFlagItemFinderInfoMod,
+    kFSEventStreamEventFlagItemChangeOwner,
+    kFSEventStreamEventFlagItemXattrMod,
+  }) {
+    runMetadataRescan(watcher, root, flag, false);
+    runMetadataRescan(watcher, root, flag, true);
   }
 }
