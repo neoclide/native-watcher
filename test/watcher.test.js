@@ -858,6 +858,50 @@ test('serializes concurrent subscription registry access', async () => {
   assert.match(stdout, /concurrent subscriptions ok/);
 });
 
+for (const moveAncestor of [false, true]) {
+  test(`invalidates a macOS subscription when its ${moveAncestor ? 'ancestor' : 'root'} is renamed`,
+    {skip: process.platform !== 'darwin', timeout: 10000}, async () => {
+      const parent = await fs.mkdtemp(path.join(
+        await fs.realpath(os.tmpdir()), 'native-watcher-root-rename-',
+      ));
+      const ancestor = path.join(parent, 'ancestor');
+      const root = path.join(ancestor, 'root');
+      const file = path.join(root, 'existing.txt');
+      await fs.mkdir(root, {recursive: true});
+      await fs.writeFile(file, 'before');
+      const collector = new EventCollector();
+      const subscription = await watcher.subscribe(root, collector.callback);
+      let recovered;
+      try {
+        const barrier = path.join(root, 'ready');
+        let observed = collector.waitFor('create', barrier);
+        await fs.writeFile(barrier, 'ready');
+        await observed;
+
+        const mark = collector.mark();
+        observed = collector.waitFrom(mark, events =>
+          events.some(event => event.path === root && event.type === 'delete') &&
+          events.some(event => event.path === file && event.type === 'delete'));
+        await fs.rename(moveAncestor ? ancestor : root, path.join(parent, 'moved'));
+        await observed;
+
+        // Reusing the same options must rebuild the stopped native stream even
+        // while the original subscription still owns a callback.
+        await fs.mkdir(root, {recursive: true});
+        const next = new EventCollector();
+        recovered = await watcher.subscribe(root, next.callback);
+        const marker = path.join(root, 'recovered.txt');
+        observed = next.waitFor('create', marker);
+        await fs.writeFile(marker, 'after');
+        await observed;
+      } finally {
+        if (recovered) await recovered.unsubscribe();
+        await subscription.unsubscribe();
+        await fs.rm(parent, {recursive: true, force: true});
+      }
+    });
+}
+
 test(
   'recovers macOS subscriptions after their watched root is deleted',
   {skip: process.platform !== 'darwin'},

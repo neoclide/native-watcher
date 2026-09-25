@@ -446,6 +446,21 @@ void processEvents(
   EventList &list = watcher->mEvents;
   bool deletedRoot = false;
 
+  // RootChanged also covers a renamed ancestor. Retire the old tree even if
+  // another directory has already appeared at the watched path.
+  if (std::any_of(events.begin(), events.end(), [](const PendingEvent &event) {
+    return hasFlag(event.flags, kFSEventStreamEventFlagRootChanged);
+  })) {
+    removeIndexedPath(state, list, watcher->mDir);
+    auto stream = state->stream.exchange(nullptr);
+    if (stream != nullptr) {
+      watcher->mNeedsResubscribe = true;
+      stopStreamAfterCallback(stateGuard, stream);
+    }
+    watcher->notify();
+    return;
+  }
+
   bool requiresRescan = std::any_of(
     events.begin(),
     events.end(),
@@ -727,7 +742,7 @@ void FSEventsBackend::startStream(WatcherRef watcher, FSEventStreamEventId id) {
     pathsToWatch,
     id,
     latency,
-    kFSEventStreamCreateFlagFileEvents
+    kFSEventStreamCreateFlagFileEvents | kFSEventStreamCreateFlagWatchRoot
   );
   releaseWatcherContext(callbackWatcher);
   if (stream == nullptr) {
