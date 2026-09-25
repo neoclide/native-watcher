@@ -564,6 +564,39 @@ test('ignores symlink creation and deletion without following its target', async
   assert.equal(await fs.readFile(target, 'utf8'), 'content');
 });
 
+for (const kind of ['symlink', 'FIFO']) {
+  test(`reports deletion when an incoming ${kind} replaces a Linux file`,
+    {skip: process.platform !== 'linux'}, async (t) => {
+      let target;
+      const {directory, collector} = await createFixture(t, undefined, async (root) => {
+        target = path.join(root, 'file.txt');
+        await fs.writeFile(target, 'before');
+      });
+      const outside = await fs.mkdtemp(`${directory}-outside-`);
+      t.after(() => fs.rm(outside, {recursive: true, force: true}));
+      const incoming = path.join(outside, 'incoming');
+      if (kind === 'symlink') {
+        await fs.symlink(path.join(outside, 'missing'), incoming);
+      } else {
+        await execFileAsync('mkfifo', [incoming]);
+      }
+
+      let waiting = collector.waitFor('delete', target);
+      await fs.rename(incoming, target);
+      const deleted = await waiting;
+      assert.equal(deleted.find(event => event.path === target).kind, 'file');
+      assert.ok(deleted.filter(event => event.path === target)
+        .every(event => event.type === 'delete' && event.renameId === undefined));
+
+      // A regular file returning to this path must be newly created, not an
+      // update to the stale index entry left by the replaced file.
+      await fs.unlink(target);
+      waiting = collector.waitFor('create', target);
+      await fs.writeFile(target, 'after');
+      await waiting;
+    });
+}
+
 test('ignores FIFO entries', {skip: process.platform === 'win32'}, async (t) => {
   const {directory, collector} = await createFixture(t);
   const fifo = path.join(directory, 'pipe');

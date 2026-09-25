@@ -537,7 +537,12 @@ bool InotifyBackend::handleSubscription(struct inotify_event *event, std::shared
       return false;
     }
     if (!S_ISREG(st.st_mode) && !S_ISDIR(st.st_mode)) {
-      return false;
+      auto removed = sub->tree->extract(path);
+      for (const auto &entry : removed) {
+        watcher->mEvents.remove(entry.path, entryKind(entry.isDir));
+        if (entry.isDir) removeSubscriptions(watcher.get(), entry.path);
+      }
+      return !removed.empty();
     }
     if (!isMoveWithinRoot) {
       if (sub->tree->find(path).has_value()) {
