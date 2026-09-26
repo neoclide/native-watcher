@@ -135,6 +135,16 @@ await watcher.subscribe(root, callback, {
 npm test
 ```
 
+On Windows, enable [Developer Mode](https://learn.microsoft.com/en-us/windows/advanced-settings/developer-mode) to run the full test suite from a non-administrator terminal. The tests create real file symlinks, which Windows otherwise restricts. In PowerShell, use `npm.cmd run test`.
+
+To build and test the current working tree on the Windows machine configured as SSH host `win11`:
+
+```sh
+./scripts/test-windows.sh
+```
+
+The remote machine needs Node.js, Python, Visual Studio C++ Build Tools, and `tar.exe`. The script uploads the source to `%USERPROFILE%\native-watcher`, runs `npm ci` and `npm run test`, and keeps the source and build output there. Only the transfer archive is removed after completion.
+
 ## License
 
 MIT (derived from [`@parcel/watcher`](https://github.com/parcel-bundler/watcher) 2.6.0).
