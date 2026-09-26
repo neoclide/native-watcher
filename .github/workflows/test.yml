@@ -19,12 +19,20 @@ jobs:
             runner: ubuntu-24.04-arm
             artifact: linux-arm64-glibc
     runs-on: ${{ matrix.runner }}
-    container: node:20-bullseye
+    # Match the glibc baseline of official Node.js 20 binaries.
+    container: almalinux:8
+    env:
+      PYTHON: /usr/bin/python3.11
     steps:
+      - name: Install build tools
+        run: dnf --enablerepo=powertools install -y gcc-c++ libstdc++-static make python3.11 git tar gzip
       - uses: actions/checkout@v6
-      - name: Ensure build tools
-        run: which python3 make g++ || (apt-get update && apt-get install -y python3 make g++)
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 20
       - run: npm ci
+      - name: Check glibc requirement
+        run: node scripts/check-glibc.cjs
       - run: npm test
       - name: Upload native addon
         uses: actions/upload-artifact@v4

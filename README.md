@@ -19,6 +19,13 @@ The compiled binary will be placed at `build/Release/native_watcher.node`.
 
 Prebuilt binaries for Linux (x64/arm64, glibc/musl), macOS (x64/arm64), and Windows (x64/arm64) are also available from GitHub Actions artifacts.
 
+Linux glibc prebuilds target **glibc 2.28 or newer**, matching the baseline of
+[official Node.js 20 binaries](https://github.com/nodejs/node/blob/v20.x/BUILDING.md#official-binary-platforms-and-toolchains).
+CI builds and tests them on AlmaLinux 8 and checks the binary's required glibc
+symbol versions with `node scripts/check-glibc.cjs`. The C++ standard library is
+linked statically. Building from source on a newer distribution can produce a
+binary that requires a newer glibc.
+
 With an authenticated GitHub CLI, download every binary from the latest successful `main` CI run:
 
 ```sh
