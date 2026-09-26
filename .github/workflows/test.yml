@@ -50,6 +50,30 @@ jobs:
           path: build/Release/native_watcher.node
           if-no-files-found: error
 
+  linux-musl-arm64:
+    name: Linux arm64 (musl)
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v6
+      # JavaScript actions cannot run in an ARM64 Alpine job container.
+      # Keep checkout/upload on Ubuntu; build and test with Alpine's musl.
+      - name: Build and test on Alpine
+        run: |
+          docker run --rm \
+            -v "$GITHUB_WORKSPACE:/workspace" \
+            -w /workspace \
+            node:20-alpine sh -ec '
+              apk add --no-cache python3 make g++
+              npm ci
+              npm test
+            '
+      - name: Upload native addon
+        uses: actions/upload-artifact@v4
+        with:
+          name: native-watcher-linux-arm64-musl
+          path: build/Release/native_watcher.node
+          if-no-files-found: error
+
   native:
     name: ${{ matrix.name }}
     strategy:
