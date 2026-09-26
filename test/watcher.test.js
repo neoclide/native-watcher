@@ -565,36 +565,46 @@ test('ignores symlink creation and deletion without following its target', async
 });
 
 for (const kind of ['symlink', 'FIFO']) {
-  test(`reports deletion when an incoming ${kind} replaces a Linux file`,
-    {skip: process.platform !== 'linux'}, async (t) => {
-      let target;
-      const {directory, collector} = await createFixture(t, undefined, async (root) => {
-        target = path.join(root, 'file.txt');
-        await fs.writeFile(target, 'before');
+  for (const withinRoot of [false, true]) {
+    test(`reports deletion when a ${kind} moved ${withinRoot ? 'within' : 'into'} the root replaces a Linux file`,
+      {skip: process.platform !== 'linux'}, async (t) => {
+        let target;
+        const {directory, collector} = await createFixture(t, undefined, async (root) => {
+          target = path.join(root, 'file.txt');
+          await fs.writeFile(target, 'before');
+        });
+        const source = withinRoot ? directory : await fs.mkdtemp(`${directory}-outside-`);
+        if (!withinRoot) {
+          t.after(() => fs.rm(source, {recursive: true, force: true}));
+        }
+        const incoming = path.join(source, 'incoming');
+        if (kind === 'symlink') {
+          await fs.symlink(path.join(source, 'missing'), incoming);
+        } else {
+          await execFileAsync('mkfifo', [incoming]);
+        }
+
+        const barrier = path.join(directory, 'startup-barrier');
+        let waiting = collector.waitFor('create', barrier);
+        await fs.writeFile(barrier, 'ready');
+        assertNoPath(await waiting, incoming);
+
+        waiting = collector.waitFor('delete', target);
+        await fs.rename(incoming, target);
+        const deleted = await waiting;
+        assert.equal(deleted.find(event => event.path === target).kind, 'file');
+        assert.ok(deleted.filter(event => event.path === target)
+          .every(event => event.type === 'delete' && event.renameId === undefined));
+        assertNoPath(deleted, incoming);
+
+        // A regular file returning to this path must be newly created, not an
+        // update to the stale index entry left by the replaced file.
+        await fs.unlink(target);
+        waiting = collector.waitFor('create', target);
+        await fs.writeFile(target, 'after');
+        await waiting;
       });
-      const outside = await fs.mkdtemp(`${directory}-outside-`);
-      t.after(() => fs.rm(outside, {recursive: true, force: true}));
-      const incoming = path.join(outside, 'incoming');
-      if (kind === 'symlink') {
-        await fs.symlink(path.join(outside, 'missing'), incoming);
-      } else {
-        await execFileAsync('mkfifo', [incoming]);
-      }
-
-      let waiting = collector.waitFor('delete', target);
-      await fs.rename(incoming, target);
-      const deleted = await waiting;
-      assert.equal(deleted.find(event => event.path === target).kind, 'file');
-      assert.ok(deleted.filter(event => event.path === target)
-        .every(event => event.type === 'delete' && event.renameId === undefined));
-
-      // A regular file returning to this path must be newly created, not an
-      // update to the stale index entry left by the replaced file.
-      await fs.unlink(target);
-      waiting = collector.waitFor('create', target);
-      await fs.writeFile(target, 'after');
-      await waiting;
-    });
+  }
 }
 
 test('ignores FIFO entries', {skip: process.platform === 'win32'}, async (t) => {
@@ -892,13 +902,13 @@ test('serializes concurrent subscription registry access', async () => {
 });
 
 for (const moveAncestor of [false, true]) {
-  test(`invalidates a macOS subscription when its ${moveAncestor ? 'ancestor' : 'root'} is renamed`,
-    {skip: process.platform !== 'darwin', timeout: 10000}, async () => {
+  test(`invalidates a subscription when its ${moveAncestor ? 'ancestor' : 'root'} is renamed`,
+    {skip: !['darwin', 'linux'].includes(process.platform), timeout: 10000}, async () => {
       const parent = await fs.mkdtemp(path.join(
         await fs.realpath(os.tmpdir()), 'native-watcher-root-rename-',
       ));
       const ancestor = path.join(parent, 'ancestor');
-      const root = path.join(ancestor, 'root');
+      const root = path.join(ancestor, 'nested', 'root');
       const file = path.join(root, 'existing.txt');
       await fs.mkdir(root, {recursive: true});
       await fs.writeFile(file, 'before');
@@ -918,7 +928,7 @@ for (const moveAncestor of [false, true]) {
         await fs.rename(moveAncestor ? ancestor : root, path.join(parent, 'moved'));
         await observed;
 
-        // Reusing the same options must rebuild the stopped native stream even
+        // Reusing the same options must rebuild the stopped native watches even
         // while the original subscription still owns a callback.
         await fs.mkdir(root, {recursive: true});
         const next = new EventCollector();
@@ -930,6 +940,66 @@ for (const moveAncestor of [false, true]) {
       } finally {
         if (recovered) await recovered.unsubscribe();
         await subscription.unsubscribe();
+        await fs.rm(parent, {recursive: true, force: true});
+      }
+    });
+}
+
+for (const parentFirst of [false, true]) {
+  test(`invalidates a Linux root on ancestor rename with the parent subscribed ${parentFirst ? 'first' : 'last'}`,
+    {skip: process.platform !== 'linux'}, async () => {
+      const parent = await fs.mkdtemp(path.join(
+        await fs.realpath(os.tmpdir()), 'native-watcher-shared-ancestor-',
+      ));
+      const ancestor = path.join(parent, 'ancestor');
+      const root = path.join(ancestor, 'root');
+      const file = path.join(root, 'existing.txt');
+      const moved = path.join(parent, 'moved');
+      await fs.mkdir(root, {recursive: true});
+      await fs.writeFile(file, 'before');
+      const parentEvents = new EventCollector();
+      const rootEvents = new EventCollector();
+      let parentSubscription;
+      let rootSubscription;
+      try {
+        if (parentFirst) {
+          parentSubscription = await watcher.subscribe(parent, parentEvents.callback);
+        }
+        rootSubscription = await watcher.subscribe(root, rootEvents.callback);
+        if (!parentFirst) {
+          parentSubscription = await watcher.subscribe(parent, parentEvents.callback);
+        }
+
+        // Shared ancestor watches must preserve the parent's child events.
+        const ready = path.join(root, 'ready');
+        const rootReady = rootEvents.waitFor('create', ready);
+        const parentReady = parentEvents.waitFor('create', ready);
+        await fs.writeFile(ready, 'ready');
+        await Promise.all([rootReady, parentReady]);
+
+        const mark = rootEvents.mark();
+        const invalidated = rootEvents.waitFrom(mark, events =>
+          events.some(event => event.path === root && event.type === 'delete') &&
+          events.some(event => event.path === file && event.type === 'delete'));
+        const movedFile = path.join(moved, 'root', 'existing.txt');
+        const parentMoved = parentEvents.waitFor('create', movedFile);
+        await fs.rename(ancestor, moved);
+        await Promise.all([invalidated, parentMoved]);
+
+        const retiredMark = rootEvents.mark();
+        const parentUpdated = parentEvents.waitFor('update', movedFile);
+        await fs.appendFile(movedFile, 'after');
+        await parentUpdated;
+        assert.deepEqual(rootEvents.events.slice(retiredMark), []);
+
+        await rootSubscription.unsubscribe();
+        const marker = path.join(moved, 'root', 'parent-only.txt');
+        const parentObserved = parentEvents.waitFor('create', marker);
+        await fs.writeFile(marker, 'after unsubscribe');
+        await parentObserved;
+      } finally {
+        if (rootSubscription) await rootSubscription.unsubscribe();
+        if (parentSubscription) await parentSubscription.unsubscribe();
         await fs.rm(parent, {recursive: true, force: true});
       }
     });

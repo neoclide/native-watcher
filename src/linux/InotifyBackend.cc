@@ -111,6 +111,18 @@ void InotifyBackend::subscribe(WatcherRef watcher) {
   std::shared_ptr<DirTree> tree = getTree(watcher, false);
 
   try {
+    // Ancestor renames do not produce IN_MOVE_SELF on the root. Watch each
+    // ancestor before opening the root so those changes cannot go unnoticed.
+    for (size_t slash = watcher->mDir.find('/', 1); slash != std::string::npos;
+         slash = watcher->mDir.find('/', slash + 1)) {
+      std::string ancestor = watcher->mDir.substr(0, slash);
+      if (!watchDir(watcher, ancestor, tree)) {
+        throw WatcherError(
+          "Unable to watch ancestor '" + ancestor + "': " + strerror(errno),
+          watcher
+        );
+      }
+    }
     if (!watchDir(watcher, watcher->mDir, tree) ||
         !addCreatedTree(watcher, watcher->mDir, tree, false)) {
       throw WatcherError(
@@ -126,7 +138,11 @@ void InotifyBackend::subscribe(WatcherRef watcher) {
 }
 
 bool InotifyBackend::watchDir(WatcherRef watcher, std::string path, std::shared_ptr<DirTree> tree) {
-  int wd = inotify_add_watch(mInotify, path.c_str(), INOTIFY_MASK);
+  uint32_t mask = path != watcher->mDir && isPathOrDescendant(watcher->mDir, path)
+    ? IN_MOVE_SELF | IN_DELETE_SELF | IN_ONLYDIR
+    : INOTIFY_MASK;
+  // A recursive subscription may already share this ancestor's descriptor.
+  int wd = inotify_add_watch(mInotify, path.c_str(), mask | IN_MASK_ADD);
   if (wd == -1) {
     return false;
   }
@@ -413,7 +429,7 @@ void InotifyBackend::removeSubscriptions(
   for (auto it = mSubscriptions.begin(); it != mSubscriptions.end();) {
     if (
       it->second->watcher.get() == watcher &&
-      isPathOrDescendant(it->second->path, path)
+      (path == watcher->mDir || isPathOrDescendant(it->second->path, path))
     ) {
       removedDescriptors.insert(it->first);
       it = mSubscriptions.erase(it);
@@ -452,6 +468,35 @@ bool InotifyBackend::handleSubscription(struct inotify_event *event, std::shared
   std::string path = std::string(sub->path);
   bool isDir = event->mask & IN_ISDIR;
 
+  if (path != watcher->mDir && isPathOrDescendant(watcher->mDir, path)) {
+    // Shared ancestor descriptors can also deliver unrelated child events.
+    if (!(event->mask & (IN_MOVE_SELF | IN_DELETE_SELF | IN_IGNORED))) {
+      return false;
+    }
+    path = watcher->mDir;
+  }
+
+  if (path == watcher->mDir &&
+      (event->mask & (IN_MOVE_SELF | IN_DELETE_SELF | IN_IGNORED))) {
+    for (const auto &entry : sub->tree->extract(path)) {
+      watcher->mEvents.remove(entry.path, entryKind(entry.isDir));
+    }
+    // Entries waiting for a move pair are no longer in the tree.
+    for (auto it = pendingMoves.begin(); it != pendingMoves.end();) {
+      if (it->second.watcher.get() == watcher.get()) {
+        for (const auto &entry : it->second.entries) {
+          watcher->mEvents.remove(entry.path, entryKind(entry.isDir));
+        }
+        it = pendingMoves.erase(it);
+      } else {
+        ++it;
+      }
+    }
+    invalidate(watcher);
+    removeSubscriptions(watcher.get(), path);
+    return true;
+  }
+
   if (event->len > 0) {
     path += "/" + std::string(event->name);
   }
@@ -469,12 +514,6 @@ bool InotifyBackend::handleSubscription(struct inotify_event *event, std::shared
   }
 
   if (watcher->isIgnored(path)) {
-    return false;
-  }
-
-  if (path == watcher->mDir && (event->mask & IN_IGNORED)) {
-    invalidate(watcher);
-    removeSubscriptions(watcher.get(), watcher->mDir);
     return false;
   }
 
@@ -521,10 +560,12 @@ bool InotifyBackend::handleSubscription(struct inotify_event *event, std::shared
     }
 
     if (isMoveWithinRoot) {
-      if (sub->tree->find(path)) {
+      missingSource = move->entries.empty();
+      // Unindexed sources include symlinks and special files. Keep the old
+      // target until the type check below can report its deletion.
+      if (!missingSource && sub->tree->find(path)) {
         sub->tree->remove(path);
       }
-      missingSource = move->entries.empty();
       sub->tree->restore(std::move(move->entries), oldPath, path);
       moveSubscriptions(*move, path);
       pendingMoves.erase(pending);
@@ -551,6 +592,7 @@ bool InotifyBackend::handleSubscription(struct inotify_event *event, std::shared
         watcher->mEvents.create(path, entryKind(S_ISDIR(st.st_mode)));
       }
     } else if (missingSource) {
+      sub->tree->remove(path);
       watcher->mEvents.rename(
         oldPath,
         path,
@@ -611,8 +653,8 @@ bool InotifyBackend::handleSubscription(struct inotify_event *event, std::shared
     sub->tree->update(path, CONVERT_TIME(st.st_mtim));
   } else if (event->mask & (IN_DELETE | IN_DELETE_SELF | IN_MOVED_FROM | IN_MOVE_SELF)) {
     bool isSelfEvent = (event->mask & (IN_DELETE_SELF | IN_MOVE_SELF));
-    // Ignore delete/move self events unless this is the recursive watch root
-    if (isSelfEvent && path != watcher->mDir) {
+    // Root and ancestor self events were handled above.
+    if (isSelfEvent) {
       return false;
     }
 
@@ -645,8 +687,7 @@ bool InotifyBackend::handleSubscription(struct inotify_event *event, std::shared
       for (const auto &entry : sub->tree->extract(path)) {
         watcher->mEvents.remove(entry.path, entryKind(entry.isDir));
       }
-      if (isSelfEvent || isDir) {
-        if (isSelfEvent && path == watcher->mDir) invalidate(watcher);
+      if (isDir) {
         removeSubscriptions(watcher.get(), path);
       }
     }
