@@ -17,12 +17,31 @@ npm test
 
 The compiled binary will be placed at `build/Release/native_watcher.node`.
 
-Prebuilt binaries for Linux (x64/arm64, glibc/musl), macOS (x64/arm64), and Windows (x64/arm64) are also available from GitHub Actions artifacts. To use a prebuilt binary:
+Prebuilt binaries for Linux (x64/arm64, glibc/musl), macOS (x64/arm64), and Windows (x64/arm64) are also available from GitHub Actions artifacts.
+
+With an authenticated GitHub CLI, download every binary from the latest successful `main` CI run:
+
+```sh
+./scripts/download-ci-binaries.sh
+```
+
+Pass a numeric run ID to download a specific CI run instead.
+
+All binaries are placed side by side under `build/artifacts/<run-id>/`. Their filenames include the OS and architecture (and libc on Linux), for example:
+
+```text
+build/artifacts/<run-id>/darwin-x64-native-watcher.node
+build/artifacts/<run-id>/darwin-arm64-native-watcher.node
+build/artifacts/<run-id>/win32-x64-native-watcher.node
+build/artifacts/<run-id>/linux-arm64-musl-native-watcher.node
+```
+
+To use one of them:
 
 ```sh
 npm ci --ignore-scripts
 mkdir -p build/Release
-cp /path/to/native_watcher.node build/Release/native_watcher.node
+cp /path/to/matching-native-watcher.node build/Release/native_watcher.node
 ```
 
 ## Usage
