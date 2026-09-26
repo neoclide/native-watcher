@@ -592,13 +592,19 @@ bool InotifyBackend::handleSubscription(struct inotify_event *event, std::shared
         watcher->mEvents.create(path, entryKind(S_ISDIR(st.st_mode)));
       }
     } else if (missingSource) {
+      EntryKind kind = entryKind(S_ISDIR(st.st_mode));
+      if (sub->tree->find(path)) {
+        watcher->mEvents.remove(oldPath, kind);
+        watcher->mEvents.update(path, kind);
+      } else {
+        watcher->mEvents.rename(
+          oldPath,
+          path,
+          "inotify:" + std::to_string(event->cookie),
+          kind
+        );
+      }
       sub->tree->remove(path);
-      watcher->mEvents.rename(
-        oldPath,
-        path,
-        "inotify:" + std::to_string(event->cookie),
-        entryKind(S_ISDIR(st.st_mode))
-      );
     }
     bool isDirectory = S_ISDIR(st.st_mode);
     if (isMoveWithinRoot) {

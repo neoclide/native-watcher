@@ -68,6 +68,13 @@ test('reports an atomic replacement of an existing file as update on macOS',
     `replacement reported as create: ${JSON.stringify(events)}`);
   });
 
+test('reports an atomic replacement before the temporary file is indexed on Linux',
+  {skip: process.platform !== 'linux'}, async () => {
+    await execFileAsync(process.execPath, [
+      path.join(__dirname, 'fixtures', 'linux-atomic-replacement.js'),
+    ], {timeout: 15000});
+  });
+
 test(
   'reports delete and create for rapid type replacements',
   {skip: process.platform !== 'darwin' && process.platform !== 'linux'},
