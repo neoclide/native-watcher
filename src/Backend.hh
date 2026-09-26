@@ -34,6 +34,7 @@ public:
 protected:
   std::unordered_set<WatcherRef> mSubscriptions;
   void handleError(std::exception &err);
+  virtual void stop() {}
 private:
   std::unordered_set<WatcherRef> mInvalidSubscriptions;
   std::unordered_set<WatcherRef> mPendingSubscriptions;

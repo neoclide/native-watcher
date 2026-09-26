@@ -66,6 +66,9 @@ void BruteForceBackend::readTree(WatcherRef watcher, std::shared_ptr<DirTree> tr
 }
 
 void WindowsBackend::start() {
+  // Keep this backend alive through terminal error cleanup and the next
+  // iteration of this loop.
+  auto self = shared_from_this();
   mRunning = true;
   notifyStarted();
 
@@ -75,6 +78,10 @@ void WindowsBackend::start() {
 }
 
 WindowsBackend::~WindowsBackend() {
+  stop();
+}
+
+void WindowsBackend::stop() {
   // Mark as stopped, and queue a noop function in the thread to break the loop
   mRunning = false;
   QueueUserAPC([](__in ULONG_PTR) {}, mThread.native_handle(), (ULONG_PTR)this);
