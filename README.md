@@ -27,13 +27,13 @@ With an authenticated GitHub CLI, download every binary from the latest successf
 
 Pass a numeric run ID to download a specific CI run instead.
 
-All binaries are placed side by side under `build/artifacts/<run-id>/`. Their filenames include the OS and architecture (and libc on Linux), for example:
+The `build/artifacts/` directory is cleared before downloading. All binaries are placed side by side in it. Their filenames include the OS and architecture (and libc on Linux), for example:
 
 ```text
-build/artifacts/<run-id>/darwin-x64-native-watcher.node
-build/artifacts/<run-id>/darwin-arm64-native-watcher.node
-build/artifacts/<run-id>/win32-x64-native-watcher.node
-build/artifacts/<run-id>/linux-arm64-musl-native-watcher.node
+build/artifacts/darwin-x64.node
+build/artifacts/darwin-arm64.node
+build/artifacts/win32-x64.node
+build/artifacts/linux-arm64-musl.node
 ```
 
 To use one of them:
