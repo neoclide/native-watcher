@@ -233,7 +233,9 @@ public:
   }
 
   void processEvents(DWORD errorCode, DWORD numBytes) {
-    if (mStopRequested) {
+    // The stop request can precede its queued APC. Only beginStop() makes
+    // this completion the last callback that can access the subscription.
+    if (!mRunning) {
       finishStop();
       return;
     }
