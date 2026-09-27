@@ -14,6 +14,6 @@ rsync -az -e 'ssh -o BatchMode=yes -o ConnectTimeout=10' \
   src test scripts \
   "$remote_host:$remote_dir/"
 
-# npm ci runs the native addon install build before the tests load it.
+# Match CI: build, strip, then test the same native addon.
 ssh -o BatchMode=yes -o ConnectTimeout=10 "$remote_host" \
-  "cd '$remote_dir' && npm ci && npm run test"
+  "cd '$remote_dir' && npm ci && strip --strip-unneeded build/Release/native_watcher.node && npm run test"

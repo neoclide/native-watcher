@@ -27,7 +27,10 @@
           "defines": ["FS_EVENTS"],
           "xcode_settings": {
             "CLANG_CXX_LANGUAGE_STANDARD": "c++17",
-            "GCC_ENABLE_CPP_EXCEPTIONS": "YES"
+            "GCC_ENABLE_CPP_EXCEPTIONS": "YES",
+            "GCC_SYMBOLS_PRIVATE_EXTERN": "YES",
+            "GCC_INLINES_ARE_PRIVATE_EXTERN": "YES",
+            "DEAD_CODE_STRIPPING": "YES"
           }
         }],
         ["OS=='linux'", {
@@ -36,10 +39,13 @@
             "src/linux/InotifyBackend.cc",
             "src/unix/legacy.cc"
           ],
+          "cflags": ["-fvisibility=hidden", "-ffunction-sections", "-fdata-sections"],
+          "cflags_cc": ["-fvisibility-inlines-hidden"],
           "ldflags": [
             "-static-libstdc++",
             "-Wl,-Bsymbolic",
-            "-Wl,--exclude-libs,ALL"
+            "-Wl,--exclude-libs,ALL",
+            "-Wl,--gc-sections"
           ],
           "defines": ["INOTIFY"]
         }],
