@@ -2,12 +2,13 @@
 #define GLOB_H
 
 #include <unordered_set>
-#include <regex>
+#include <string>
+#include <vector>
 
 struct Glob {
   std::size_t mHash;
   std::string mRaw;
-  std::regex mRegex;
+  std::vector<std::string> mComponents;
 
   Glob(std::string raw);
 
@@ -15,7 +16,7 @@ struct Glob {
     return mHash == other.mHash && mRaw == other.mRaw;
   }
 
-  bool isIgnored(std::string relative_path) const;
+  bool isIgnored(const std::string &relativePath, const std::string &root) const;
 };
 
 namespace std

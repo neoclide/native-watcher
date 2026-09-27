@@ -15,8 +15,8 @@ export interface WatchEvent {
 }
 
 export interface WatchOptions {
-  /** Paths, glob patterns, or flag-free regular expressions to exclude. */
-  ignore?: Array<string | RegExp>;
+  /** Paths or restricted glob patterns to exclude. */
+  ignore?: string[];
 }
 
 export interface Subscription {

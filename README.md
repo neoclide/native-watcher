@@ -76,7 +76,7 @@ const subscription = await watcher.subscribe(
     ignore: [
       'node_modules',
       '**/*.generated.js',
-      /(^|\/)dist(\/|$)/,
+      'dist/**',
     ],
   },
 );
@@ -93,7 +93,7 @@ Starts watching `directory` recursively. Returns a `Promise<Subscription>`.
 
 - **`directory`**: Directory to watch (relative paths resolve against `process.cwd()`).
 - **`callback(error, events)`**: Callback receiving an `Error` or an array of `WatchEvent`.
-- **`options.ignore`**: Array of relative/absolute paths, glob strings, or regular expressions to ignore.
+- **`options.ignore`**: Array of relative/absolute paths or restricted glob strings to ignore.
 - **`subscription.unsubscribe()`**: Stops watching and returns a `Promise<void>`.
 
 ### `WatchEvent`
@@ -122,10 +122,29 @@ await watcher.subscribe(root, callback, {
     'cache',                 // Relative path
     '/absolute/tmp/output',  // Absolute path
     '**/*.log',              // Glob (relative to root)
-    /node_modules/,          // RegExp (ECMAScript syntax without flags)
+    'node_modules/**',       // Glob (relative to root)
   ],
 });
 ```
+
+Only `*` has special meaning. It matches zero or more characters within one
+path component, including dotfiles. A component exactly equal to `**` matches
+zero or more whole components, so `**/*.log` also matches `file.log` and
+`cache/**` matches `cache` and its descendants. Other glob punctuation,
+including `?`, `[]`, `{}`, `()`, `!`, `#`, `+`, `^`, `$`, is literal. Patterns
+match complete paths relative to the watched root; relative literal paths use
+the same native matcher after path normalization. Matching a directory excludes
+its subtree. Windows accepts both slash styles as separators; backslash is
+literal on POSIX. Raw glob strings preserve leading, repeated, and trailing
+separators, so they only match paths with the same component structure.
+
+This replaces the earlier RegExp protocol. `RegExp` values are rejected, and
+direct native consumers must pass raw glob strings in `ignoreGlobs`, not regular
+expression source. Case folding is used only when the actual parent directory
+reports that it is case-insensitive. If that query is unavailable or the parent
+has gone away, only exact matching applies. macOS and Windows use their native
+Unicode comparison APIs. On Linux ext4 casefold directories, folding is ASCII
+only; non-ASCII UTF-8 bytes remain literal.
 
 ## Platform Backends
 

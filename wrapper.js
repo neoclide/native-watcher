@@ -2,8 +2,6 @@
 
 const fs = require('node:fs/promises');
 const path = require('path');
-const isGlob = require('is-glob');
-const picomatch = require('picomatch');
 
 function normalizeOptions(directory, options = {}, inputDirectory = directory) {
   const {ignore, ...nativeOptions} = options;
@@ -11,31 +9,28 @@ function normalizeOptions(directory, options = {}, inputDirectory = directory) {
   if (!Array.isArray(ignore)) return nativeOptions;
 
   for (const value of ignore) {
-    if (value instanceof RegExp) {
-      if (value.flags !== '') {
-        throw new Error('RegExp ignore patterns cannot use flags');
-      }
-      (nativeOptions.ignoreGlobs ??= []).push(
-        `^[\\s\\S]*(?:${value.source})[\\s\\S]*$`,
-      );
-    } else if (isGlob(value)) {
-      const regex = picomatch.makeRe(value, {
-        dot: true,
-        windows: process.platform === 'win32',
-      });
-      (nativeOptions.ignoreGlobs ??= []).push(regex.source);
+    if (typeof value !== 'string') {
+      throw new TypeError('Expected ignore patterns to be strings');
+    }
+    if (value.includes('\0')) {
+      throw new TypeError('ignore patterns cannot contain NUL characters');
+    }
+    if (value.includes('*')) {
+      (nativeOptions.ignoreGlobs ??= []).push(value);
+      continue;
+    }
+    const absolutePath = path.resolve(inputDirectory, value);
+    const relativePath = path.relative(inputDirectory, absolutePath);
+    const isInsideRoot = relativePath === '' || (
+      relativePath !== '..' &&
+      !relativePath.startsWith(`..${path.sep}`) &&
+      !path.isAbsolute(relativePath)
+    );
+    if (isInsideRoot && relativePath !== '') {
+      (nativeOptions.ignoreGlobs ??= []).push(relativePath);
     } else {
-      const absolutePath = path.resolve(inputDirectory, value);
-      const relativePath = path.relative(inputDirectory, absolutePath);
-      const isInsideRoot = relativePath === '' || (
-        relativePath !== '..' &&
-        !relativePath.startsWith(`..${path.sep}`) &&
-        !path.isAbsolute(relativePath)
-      );
       (nativeOptions.ignorePaths ??= []).push(
-        isInsideRoot
-          ? path.resolve(directory, relativePath)
-          : absolutePath,
+        isInsideRoot ? directory : absolutePath,
       );
     }
   }

@@ -3,6 +3,7 @@
 
 #include <condition_variable>
 #include <atomic>
+#include <stdexcept>
 #include <unordered_set>
 #include <set>
 #include <node_api.h>

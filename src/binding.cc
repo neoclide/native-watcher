@@ -36,19 +36,24 @@ bool getIgnoreGlobs(
 ) {
   if (opts.IsObject()) {
     Value v = opts.As<Object>().Get(String::New(env, "ignoreGlobs"));
+    if (!v.IsUndefined() && !v.IsArray()) {
+      error = "Expected ignoreGlobs to be an array of strings";
+      return false;
+    }
     if (v.IsArray()) {
       Array items = v.As<Array>();
       for (size_t i = 0; i < items.Length(); i++) {
         Value item = items.Get(Number::New(env, static_cast<double>(i)));
-        if (item.IsString()) {
-          auto key = item.As<String>().Utf8Value();
-          try {
-            result.emplace(key);
-          } catch (const std::regex_error& e) {
-            error = e.what();
-            return false;
-          }
+        if (!item.IsString()) {
+          error = "Expected ignoreGlobs to be an array of strings";
+          return false;
         }
+        auto key = item.As<String>().Utf8Value();
+        if (key.find('\0') != std::string::npos) {
+          error = "ignoreGlobs cannot contain NUL characters";
+          return false;
+        }
+        result.emplace(std::move(key));
       }
     }
   }
@@ -218,9 +223,8 @@ Value queueSubscriptionWork(const CallbackInfo& info) {
   std::unordered_set<Glob> ignoreGlobs;
   std::string ignoreGlobError;
   if (!getIgnoreGlobs(env, info[2], ignoreGlobs, ignoreGlobError)) {
-    auto deferred = Promise::Deferred::New(env);
-    deferred.Reject(Error::New(env, ignoreGlobError).Value());
-    return deferred.Promise();
+    TypeError::New(env, ignoreGlobError).ThrowAsJavaScriptException();
+    return env.Null();
   }
 
   auto backend = getBackend(env, info[2]);

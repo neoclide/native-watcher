@@ -8,6 +8,7 @@
         "src/Watcher.cc",
         "src/Backend.cc",
         "src/DirTree.cc",
+        "src/CaseSensitivity.cc",
         "src/Glob.cc",
         "src/Debounce.cc"
       ],

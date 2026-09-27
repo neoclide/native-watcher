@@ -1447,7 +1447,7 @@ test(
   'filters descendants of directories matched by macOS ignore patterns',
   {skip: process.platform !== 'darwin'},
   async (t) => {
-    for (const ignore of [['ignored*'], [/^ignored-dir$/]]) {
+    for (const ignore of [['ignored*'], ['ignored-dir']]) {
       let ignoredFile;
       const {directory, collector} = await createFixture(
         t,
@@ -1615,7 +1615,7 @@ test('rejects invalid subscription arguments and options', async (t) => {
 
   await assert.rejects(
     watcher.subscribe(directory, callback, {ignore: [/ignored/i]}),
-    /cannot use flags/,
+    {name: 'TypeError', message: 'Expected ignore patterns to be strings'},
   );
 });
 
@@ -1684,7 +1684,7 @@ test('ignoring a directory ignores existing and newly created descendants', asyn
 
 test(
   'path ignores use the filesystem casing for existing and new directories',
-  {skip: !['darwin', 'win32'].includes(process.platform)},
+  {skip: !['darwin', 'win32', 'linux'].includes(process.platform)},
   async (t) => {
     const {directory, collector} = await createFixture(
       t,
@@ -1743,11 +1743,11 @@ test('ignore accepts glob patterns relative to the watched directory', async (t)
   assertEvent(events, 'create', visibleFile);
 });
 
-test('ignore accepts RegExp patterns', async (t) => {
+test('ignore globs treat regex punctuation as literals', async (t) => {
   const {directory, collector} = await createFixture(t, {
-    ignore: [/\.generated$/, /node_modules/],
+    ignore: ['file[.]generated*', 'node_modules/**'],
   });
-  const generated = path.join(directory, 'file.generated');
+  const generated = path.join(directory, 'file[.]generated.txt');
   const dependency = path.join(directory, 'node_modules', 'pkg', 'index.js');
   const visible = path.join(directory, 'file.js');
   await fs.mkdir(path.dirname(dependency), {recursive: true});
@@ -1766,18 +1766,6 @@ test('ignore accepts RegExp patterns', async (t) => {
   assertEvent(events, 'create', visible);
 });
 
-
-test('invalid native RegExp syntax does not leave a subscription running', async () => {
-  const fixture = path.join(
-    __dirname,
-    'fixtures',
-    'invalid-regex-cleanup.js',
-  );
-  const {stdout} = await execFileAsync(process.execPath, [fixture], {
-    timeout: 5000,
-  });
-  assert.match(stdout, /runtime regex failure cleanup ok/);
-});
 
 test('a move across an ignore boundary is not reported as a rename pair', async (t) => {
   const {directory, collector} = await createFixture(t, {ignore: ['ignored']});

@@ -495,12 +495,12 @@ bool Watcher::isIgnored(std::string path) {
   auto relativePath = path.substr(basePath.size());
 
   for (auto it = mIgnoreGlobs.begin(); it != mIgnoreGlobs.end(); it++) {
-    if (it->isIgnored(relativePath)) {
+    if (it->isIgnored(relativePath, mDir)) {
       return true;
     }
     for (size_t end = relativePath.find(DIR_SEP); end != std::string::npos;
          end = relativePath.find(DIR_SEP, end + 1)) {
-      if (it->isIgnored(relativePath.substr(0, end))) {
+      if (it->isIgnored(relativePath.substr(0, end), mDir)) {
         return true;
       }
     }
