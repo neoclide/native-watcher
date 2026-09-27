@@ -392,6 +392,14 @@ public:
           }
           if (hasAttributes && supported &&
               !mTree->update(path, CONVERT_TIME(data.ftLastWriteTime))) {
+            // A temporary source can disappear before its add notification is
+            // indexed. The destination still needs an event; create() also
+            // merges a preceding target removal into an update.
+            if (moved.empty()) {
+              mWatcher->mEvents.create(
+                path, entryKind(data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)
+              );
+            }
             mTree->add(
               path,
               CONVERT_TIME(data.ftLastWriteTime),

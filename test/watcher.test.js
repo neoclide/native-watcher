@@ -75,6 +75,31 @@ test('reports an atomic replacement before the temporary file is indexed on Linu
     ], {timeout: 15000});
   });
 
+test('reports rapid atomic replacements as updates on Windows',
+  {skip: process.platform !== 'win32'}, async (t) => {
+    const count = 40;
+    const {directory, collector} = await createFixture(t, undefined, (root) => {
+      for (let i = 0; i < count; i++) {
+        fsSync.writeFileSync(path.join(root, `target-${i}.txt`), 'before');
+      }
+    });
+
+    for (let i = 0; i < count; i++) {
+      const target = path.join(directory, `target-${i}.txt`);
+      const temporary = path.join(directory, `temporary-${i}.txt`);
+      const barrier = path.join(directory, `barrier-${i}.txt`);
+      const mark = collector.mark();
+      const waiting = collector.waitFor('create', barrier, mark);
+      // Rename immediately so the backend can observe the source notification
+      // after the temporary path has already disappeared.
+      fsSync.writeFileSync(temporary, 'after');
+      fsSync.renameSync(temporary, target);
+      fsSync.writeFileSync(barrier, 'ready');
+      const events = (await waiting).filter((event) => event.path === target);
+      assert.deepEqual(events, [{path: target, type: 'update', kind: 'file'}]);
+    }
+  });
+
 test(
   'reports delete and create for rapid type replacements',
   {skip: process.platform !== 'darwin' && process.platform !== 'linux'},
