@@ -1,71 +1,64 @@
 # native-watcher
 
-`native-watcher` is a minimal Node.js native addon for recursive, real-time filesystem watching, built for [coc.nvim](https://github.com/neoclide/coc.nvim).
+[![npm](https://img.shields.io/npm/v/native-watcher.svg)](https://www.npmjs.com/package/native-watcher)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-Derived from [`@parcel/watcher`](https://github.com/parcel-bundler/watcher) 2.6.0, it focuses solely on the `subscribe` API with conservative rename correlation across Linux, macOS, and Windows.
+A minimal, high-performance Node.js native addon for recursive, real-time filesystem watching, built for [coc.nvim](https://github.com/neoclide/coc.nvim).
 
-## Installation & Build
+Derived from [`@parcel/watcher`](https://github.com/parcel-bundler/watcher) 2.6.0.
 
-Requires Node.js >= 20 and a C++17 compiler.
+---
 
-```sh
-git clone https://github.com/neoclide/native-watcher.git
-cd native-watcher
-npm ci
-npm test
-```
+## Why native-watcher?
 
-The compiled binary will be placed at `build/Release/native_watcher.node`.
+[coc.nvim](https://github.com/neoclide/coc.nvim) requires a reliable, lightweight filesystem watcher to track workspace changes in real time for buffer synchronization, diagnostics, and Language Server Protocol (LSP) workspace monitoring.
 
-Prebuilt binaries for Linux (x64/arm64, glibc/musl), macOS (x64/arm64), and Windows (x64/arm64) are also available from GitHub Actions artifacts.
+Existing solutions like `@parcel/watcher` are designed primarily for web bundlers and carry unnecessary complexity for editor integration:
+- **Excessive overhead**: Bundler-specific features such as snapshot persistence (`writeSnapshot`), historical change queries (`getEventsSince`), Watchman fallbacks, and WASM backends increase binary size and maintenance burden.
+- **Uncorrelated renames**: Standard watchers emit disconnected `delete` and `create` events when files or folders are moved or renamed, forcing editors to treat renames as complete file deletions followed by new file additions.
+- **JavaScript regex overhead**: Processing ignore rules through JS regular expressions creates unnecessary serialization and IPC overhead during rapid file operations.
 
-Linux and macOS builds hide internal symbols and discard unused code at link time.
-CI also strips the binaries before running the full test suite, so the uploaded
-artifacts are the exact files tested. Source builds retain their symbol tables
-for diagnostics. C++ exceptions remain enabled.
+`native-watcher` was created to provide a lean, zero-bloat native watcher that focuses strictly on real-time subscriptions with native rename correlation and in-engine ignore matching.
 
-Linux glibc prebuilds target **glibc 2.28 or newer**, matching the baseline of
-[official Node.js 20 binaries](https://github.com/nodejs/node/blob/v20.x/BUILDING.md#official-binary-platforms-and-toolchains).
-CI builds and tests them on AlmaLinux 8 and checks the binary's required glibc
-symbol versions with `node scripts/check-glibc.cjs`. The C++ standard library is
-linked statically. Building from source on a newer distribution can produce a
-binary that requires a newer glibc.
+---
 
-With an authenticated GitHub CLI, download every binary from the latest successful `main` CI run:
+## Improvements over `@parcel/watcher`
 
-```sh
-./scripts/download-ci-binaries.sh
-```
+- **Minimalist API surface**: Stripped snapshot persistence (`writeSnapshot`, `getEventsSince`), Watchman integration, and WASM fallbacks. Exposes solely `subscribe` and `unsubscribe` with zero unnecessary runtime dependencies.
+- **Conservative rename correlation (`renameId`)**: Correlates paired file and directory moves across all supported platforms, tagging matching `delete` (source) and `create` (target) events with a shared `renameId`:
+  - **Linux (`inotify`)**: Correlated via `IN_MOVED_FROM` / `IN_MOVED_TO` cookie.
+  - **macOS (`FSEvents`)**: Correlated via inode and device identity tracking.
+  - **Windows (`ReadDirectoryChangesW`)**: Correlated via paired old/new rename records.
+- **Native raw glob matcher**: Replaced the JS RegExp ignore pipeline with an in-engine glob engine (`*` and `**`) implemented in C++. Automatically queries per-component filesystem case sensitivity (macOS, Windows, and Linux ext4 casefold).
+- **Platform robustness & edge-case fixes**:
+  - *Linux*: Accurately reports rapid atomic replacements (safe-write / rename) as `update` events; properly invalidates subscriptions when ancestor directories are moved or removed; handles replacement by non-regular entries.
+  - *macOS*: Preserves metadata updates during full-tree reconciliation; supports case-only renames; guarantees safe stream teardown.
+  - *Windows*: Reports rapid atomic replacements as `update` events; prevents backend use-after-free and crash during stop/error teardown.
+- **Optimized binary size**: Enabled hidden symbol visibility and link-time dead-code elimination on Linux and macOS, resulting in minimal memory and disk footprint.
 
-Pass a numeric run ID to download a specific CI run instead.
+---
 
-The `build/artifacts/` directory is cleared before downloading. All binaries are placed side by side in it. Their filenames include the OS and architecture (and libc on Linux), for example:
-
-```text
-build/artifacts/darwin-x64.node
-build/artifacts/darwin-arm64.node
-build/artifacts/win32-x64.node
-build/artifacts/linux-arm64-musl.node
-```
-
-To use one of them:
+## Installation
 
 ```sh
-npm ci --ignore-scripts
-mkdir -p build/Release
-cp /path/to/matching-native-watcher.node build/Release/native_watcher.node
+npm install native-watcher
 ```
+
+> **Note**: Requires Node.js >= 20 and a C++17 compiler (`gcc`, `clang`, or MSVC) to build the native addon upon installation.
+
+---
 
 ## Usage
 
-```js
+```javascript
 const watcher = require('native-watcher');
 
+// Start watching recursively
 const subscription = await watcher.subscribe(
-  '/absolute/project/path',
+  '/path/to/project',
   (error, events) => {
     if (error) {
-      console.error(error);
+      console.error('Watcher error:', error);
       return;
     }
     for (const event of events) {
@@ -74,107 +67,80 @@ const subscription = await watcher.subscribe(
   },
   {
     ignore: [
-      'node_modules',
-      '**/*.generated.js',
-      'dist/**',
+      'node_modules/**',
+      '**/*.log',
+      '.git/**',
     ],
   },
 );
 
-// Unsubscribe when done
+// Stop watching when done
 await subscription.unsubscribe();
 ```
 
-## API
+### Event Object (`WatchEvent`)
 
-### `subscribe(directory, callback, options?)`
+Each change triggers a batch of events:
 
-Starts watching `directory` recursively. Returns a `Promise<Subscription>`.
-
-- **`directory`**: Directory to watch (relative paths resolve against `process.cwd()`).
-- **`callback(error, events)`**: Callback receiving an `Error` or an array of `WatchEvent`.
-- **`options.ignore`**: Array of relative/absolute paths or restricted glob strings to ignore.
-- **`subscription.unsubscribe()`**: Stops watching and returns a `Promise<void>`.
-
-### `WatchEvent`
-
-Each event has this shape:
-
-```ts
+```typescript
 type WatchEvent = {
+  path: string;                      // Absolute path
   type: 'create' | 'update' | 'delete';
-  kind: 'file' | 'directory';
-  path: string;       // absolute path
-  renameId?: string;  // opaque correlation id
+  kind: 'file' | 'directory';        // Retained on delete even after removal
+  renameId?: string;                 // Set when delete and create form a correlated rename
 };
 ```
 
-Events are batched and coalesced by path and kind:
+### Ignore Patterns
 
-- **`kind`**: `'file' | 'directory'`, retained on `delete` even after the path is removed. Symlinks and special entries are skipped.
-- **`renameId`**: Paired on `delete` (old path) and `create` (new path) when the backend correlates an unambiguous rename.
+The `ignore` option accepts relative paths, absolute paths, or glob patterns:
+- `*`: Matches zero or more characters within a single path component (including dotfiles).
+- `**`: Matches zero or more complete path components (e.g., `**/*.log` matches root and nested `.log` files).
+- Directory patterns exclude the entire subtree under that directory.
 
-### Ignore Rules
+---
 
-```js
-await watcher.subscribe(root, callback, {
-  ignore: [
-    'cache',                 // Relative path
-    '/absolute/tmp/output',  // Absolute path
-    '**/*.log',              // Glob (relative to root)
-    'node_modules/**',       // Glob (relative to root)
-  ],
-});
+## Build
+
+### Requirements
+
+- Node.js >= 20
+- C++17 compiler (`gcc`, `clang`, or MSVC)
+
+### Building from Source
+
+```sh
+npm ci
+npm run build
 ```
 
-Only `*` has special meaning. It matches zero or more characters within one
-path component, including dotfiles. A component exactly equal to `**` matches
-zero or more whole components, so `**/*.log` also matches `file.log` and
-`cache/**` matches `cache` and its descendants. Other glob punctuation,
-including `?`, `[]`, `{}`, `()`, `!`, `#`, `+`, `^`, `$`, is literal. Patterns
-match complete paths relative to the watched root; relative literal paths use
-the same native matcher after path normalization. Matching a directory excludes
-its subtree. Windows accepts both slash styles as separators; backslash is
-literal on POSIX. Raw glob strings preserve leading, repeated, and trailing
-separators, so they only match paths with the same component structure.
+The compiled binary will be placed at `build/Release/native_watcher.node`.
 
-This replaces the earlier RegExp protocol. `RegExp` values are rejected, and
-direct native consumers must pass raw glob strings in `ignoreGlobs`, not regular
-expression source. Case folding is used only when the actual parent directory
-reports that it is case-insensitive. If that query is unavailable or the parent
-has gone away, only exact matching applies. macOS and Windows use their native
-Unicode comparison APIs. On Linux ext4 casefold directories, folding is ASCII
-only; non-ASCII UTF-8 bytes remain literal.
+### Prebuilt Binaries
 
-## Platform Backends
+Prebuilt binaries for Linux (x64/arm64, glibc/musl), macOS (x64/arm64), and Windows (x64/arm64) can be downloaded from GitHub Actions artifacts using:
 
-| Platform | Backend | Rename Correlation |
-| --- | --- | --- |
-| **Linux** | `inotify` | Paired `IN_MOVED_FROM` / `IN_MOVED_TO` cookie |
-| **macOS** | `FSEvents` | Matched by inode & device identity index |
-| **Windows** | `ReadDirectoryChangesW` | Paired old/new rename records |
+```sh
+./scripts/download-ci-binaries.sh
+```
 
-## Differences from `@parcel/watcher`
-
-- **Minimal API surface**: Provides only `subscribe` / `unsubscribe`. Snapshot queries (`writeSnapshot`, `getEventsSince`) and Watchman/WASM fallbacks are omitted.
-- **Rename correlation**: Associates renames via `renameId` across paired delete/create events.
-- **Tailored for [coc.nvim](https://github.com/neoclide/coc.nvim)**: Lightweight, zero unnecessary dependencies, and streamlined startup scanning.
+---
 
 ## Testing
+
+Run the test suite locally:
 
 ```sh
 npm test
 ```
 
-On Windows, enable [Developer Mode](https://learn.microsoft.com/en-us/windows/advanced-settings/developer-mode) to run the full test suite from a non-administrator terminal. The tests create real file symlinks, which Windows otherwise restricts. In PowerShell, use `npm.cmd run test`.
+> **Note for Windows**: Enable [Developer Mode](https://learn.microsoft.com/en-us/windows/advanced-settings/developer-mode) so non-admin processes can create symlinks required by the test suite.
 
-To build and test the current working tree on the Windows machine configured as SSH host `win11`:
+Cross-platform test scripts:
+- **Linux**: `./scripts/test-linux.sh` (rsyncs to remote Linux host and runs tests)
+- **Windows**: `./scripts/test-windows.sh` (transfers to remote Windows host `win11` and runs tests)
 
-```sh
-./scripts/test-windows.sh
-```
-
-The remote machine needs Node.js, Python, Visual Studio C++ Build Tools, and `tar.exe`. The script uploads the source to `%USERPROFILE%\native-watcher`, runs `npm ci` and `npm run test`, and keeps the source and build output there. Only the transfer archive is removed after completion.
+---
 
 ## License
 
