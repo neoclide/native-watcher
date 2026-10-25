@@ -59,7 +59,8 @@ std::optional<IndexedPath> readIndexedPath(const std::string &path);
 IdentityIndex scanIdentityIndex(
   const std::string &root,
   const std::function<bool(const std::string &)> &isIgnored,
-  const std::function<void(const std::string &, const IndexedPath &)> &onEntry
+  const std::function<void(const std::string &, const IndexedPath &)> &onEntry,
+  const std::function<bool()> &shouldCancel = {}
 );
 
 #endif

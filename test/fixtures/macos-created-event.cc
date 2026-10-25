@@ -4,7 +4,7 @@
 #include "macos/FSEventsBackend.cc"
 
 // The fixture exercises event classification without starting a native stream.
-bool Watcher::isIgnored(std::string) { return false; }
+bool Watcher::isIgnored(const std::string &) { return false; }
 
 int main(int argc, char **argv) {
   assert(argc == 2);

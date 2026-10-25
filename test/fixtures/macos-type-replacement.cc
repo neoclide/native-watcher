@@ -14,7 +14,7 @@ Watcher::Watcher(
     mIgnorePaths(std::move(ignorePaths)),
     mIgnoreGlobs(std::move(ignoreGlobs)) {}
 
-bool Watcher::isIgnored(std::string) { return false; }
+bool Watcher::isIgnored(const std::string &) { return false; }
 void Watcher::notify() {}
 
 void writeFile(const std::string &path, const char *contents) {

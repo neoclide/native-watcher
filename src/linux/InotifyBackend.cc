@@ -130,6 +130,11 @@ void InotifyBackend::subscribe(WatcherRef watcher) {
         "': " + strerror(errno), watcher
       );
     }
+    if (watcher->isCancelled()) {
+      watcher->mNeedsResubscribe = true;
+      removeSubscriptions(watcher.get(), watcher->mDir);
+      return;
+    }
     tree->isComplete = true;
   } catch (...) {
     removeSubscriptions(watcher.get(), watcher->mDir);
@@ -202,6 +207,10 @@ bool InotifyBackend::addCreatedTree(
   std::vector<std::string> subdirectories;
 
   while (dirent *item = readdir(directory)) {
+    if (!reportEvents && watcher->isCancelled()) {
+      closedir(directory);
+      return true;
+    }
     if (strcmp(item->d_name, ".") == 0 || strcmp(item->d_name, "..") == 0) {
       continue;
     }
@@ -231,6 +240,9 @@ bool InotifyBackend::addCreatedTree(
   closedir(directory);
 
   for (const auto &candidate : subdirectories) {
+    if (!reportEvents && watcher->isCancelled()) {
+      return true;
+    }
     if (!watchDir(watcher, candidate, tree) ||
         !addCreatedTree(watcher, candidate, tree, reportEvents)) {
       int error = errno;

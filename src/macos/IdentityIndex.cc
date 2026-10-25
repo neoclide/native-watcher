@@ -193,15 +193,21 @@ std::optional<IndexedPath> readIndexedPath(const std::string &path) {
 IdentityIndex scanIdentityIndex(
   const std::string &root,
   const std::function<bool(const std::string &)> &isIgnored,
-  const std::function<void(const std::string &, const IndexedPath &)> &onEntry
+  const std::function<void(const std::string &, const IndexedPath &)> &onEntry,
+  const std::function<bool()> &shouldCancel
 ) {
   IdentityIndex result;
+  if (shouldCancel && shouldCancel()) return result;
   char *paths[2] {const_cast<char *>(root.c_str()), nullptr};
   FTS *fts = fts_open(paths, FTS_NOCHDIR | FTS_PHYSICAL, nullptr);
   if (fts == nullptr) throw std::runtime_error(strerror(errno));
 
   FTSENT *node;
   while ((node = fts_read(fts)) != nullptr) {
+    if (shouldCancel && shouldCancel()) {
+      fts_close(fts);
+      return result;
+    }
     if (node->fts_info == FTS_DP) continue;
     std::string path(node->fts_path);
     if (node->fts_errno != 0) {

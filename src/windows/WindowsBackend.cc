@@ -19,6 +19,9 @@ void BruteForceBackend::readTree(WatcherRef watcher, std::shared_ptr<DirTree> tr
   directories.push(watcher->mDir);
 
   while (!directories.empty()) {
+    if (watcher->isCancelled()) {
+      return;
+    }
     HANDLE hFind = INVALID_HANDLE_VALUE;
 
     std::string path = directories.top();
@@ -37,6 +40,10 @@ void BruteForceBackend::readTree(WatcherRef watcher, std::shared_ptr<DirTree> tr
     }
 
     do {
+      if (watcher->isCancelled()) {
+        FindClose(hFind);
+        return;
+      }
       std::string name = utf16ToUtf8(
         ffd.cFileName,
         static_cast<DWORD>(wcslen(ffd.cFileName))
@@ -146,7 +153,12 @@ public:
     try {
       poll();
       mBackend->readTree(mWatcher, mTree);
-      mTree->isComplete = true;
+      if (mWatcher->isCancelled() || mStopRequested.load()) {
+        mWatcher->mNeedsResubscribe = true;
+        requestStop();
+      } else {
+        mTree->isComplete = true;
+      }
       mStartSignal.notify();
     } catch (std::exception &err) {
       mStartError = err.what();

@@ -34,6 +34,11 @@ static std::mutex& getSharedWatchersMutex() {
   return *mutex;
 }
 
+static std::atomic<uint64_t>& getNextWatcherId() {
+  static std::atomic<uint64_t> nextId {1};
+  return nextId;
+}
+
 WatcherRef Watcher::getShared(std::string dir, std::unordered_set<std::string> ignorePaths, std::unordered_set<Glob> ignoreGlobs) {
   WatcherRef watcher = std::make_shared<Watcher>(dir, ignorePaths, ignoreGlobs);
   std::unique_lock<std::mutex> lock(getSharedWatchersMutex());
@@ -72,12 +77,42 @@ void removeSharedLocked(Watcher *watcher) {
   }
 }
 
+void Watcher::cancelEnvironment(napi_env env) {
+  std::vector<WatcherRef> watchers;
+  {
+    std::unique_lock<std::mutex> registryLock(getSharedWatchersMutex());
+    watchers.assign(getSharedWatchers().begin(), getSharedWatchers().end());
+  }
+
+  for (auto &watcher : watchers) {
+    std::unique_lock<std::mutex> lock(watcher->mMutex);
+    bool hasThisEnv = false;
+    bool hasOtherEnv = false;
+    for (const auto &cb : watcher->mCallbacks) {
+      if (cb.env == env) {
+        hasThisEnv = true;
+      } else {
+        hasOtherEnv = true;
+      }
+    }
+    if (hasThisEnv && !hasOtherEnv) {
+      watcher->mCancelled.store(true, std::memory_order_relaxed);
+    }
+  }
+}
+
 void Watcher::cleanupEnvironment(napi_env env) {
   std::vector<WatcherRef> watchers;
   {
     std::unique_lock<std::mutex> registryLock(getSharedWatchersMutex());
     watchers.assign(getSharedWatchers().begin(), getSharedWatchers().end());
   }
+
+  struct PendingUnwatch {
+    WatcherRef watcher;
+    std::vector<std::shared_ptr<Backend>> backends;
+  };
+  std::vector<PendingUnwatch> toUnwatch;
 
   for (auto &watcher : watchers) {
     std::vector<std::shared_ptr<Backend>> backends;
@@ -98,6 +133,7 @@ void Watcher::cleanupEnvironment(napi_env env) {
 
       becameEmpty = removedCallback && watcher->mCallbacks.empty();
       if (becameEmpty) {
+        watcher->mCancelled.store(true, std::memory_order_relaxed);
         for (auto &weakBackend : watcher->mBackends) {
           if (auto backend = weakBackend.lock()) {
             backends.push_back(backend);
@@ -107,10 +143,14 @@ void Watcher::cleanupEnvironment(napi_env env) {
     }
 
     if (becameEmpty) {
-      watcher->unref();
-      for (auto &backend : backends) {
-        backend->unwatch(watcher);
-      }
+      toUnwatch.push_back(PendingUnwatch {watcher, std::move(backends)});
+    }
+  }
+
+  for (auto &item : toUnwatch) {
+    item.watcher->unref();
+    for (auto &backend : item.backends) {
+      backend->unwatch(item.watcher);
     }
   }
 }
@@ -118,9 +158,29 @@ void Watcher::cleanupEnvironment(napi_env env) {
 Watcher::Watcher(std::string dir, std::unordered_set<std::string> ignorePaths, std::unordered_set<Glob> ignoreGlobs)
   : mDir(dir),
     mIgnorePaths(ignorePaths),
-    mIgnoreGlobs(ignoreGlobs) {
-      mDebounce = Debounce::getShared();
+    mIgnoreGlobs(ignoreGlobs),
+    mId(getNextWatcherId().fetch_add(1, std::memory_order_relaxed)) {
+  mDebounce = Debounce::getShared();
+  std::unordered_set<Glob> deduplicated;
+  for (const auto &glob : mIgnoreGlobs) {
+    if (glob.mRaw.empty()) continue;
+    std::string normalized = glob.mRaw;
+    while (normalized.size() > 3 &&
+           (normalized.compare(normalized.size() - 3, 3, "/**") == 0 ||
+            normalized.compare(normalized.size() - 3, 3, "\\**") == 0)) {
+      normalized.resize(normalized.size() - 3);
     }
+    deduplicated.emplace(std::move(normalized));
+  }
+  mCompiledGlobs.assign(deduplicated.begin(), deduplicated.end());
+  mAllGlobsUseBitmask = true;
+  for (const auto &glob : mCompiledGlobs) {
+    if (!glob.mUseBitmask) {
+      mAllGlobsUseBitmask = false;
+      break;
+    }
+  }
+}
 
 Watcher::~Watcher() {
   mDebounce->remove(this);
@@ -244,6 +304,8 @@ void Watcher::triggerCallbacks() {
 bool Watcher::watch(Function callback) {
   std::unique_lock<std::mutex> lk(mMutex);
 
+  mCancelled.store(false, std::memory_order_relaxed);
+
   auto it = findCallback(callback);
   if (it != mCallbacks.end()) {
     return false;
@@ -285,6 +347,9 @@ void Watcher::finishErrorCallback(uint64_t callbackId) {
       }
     }
     becameEmpty = mCallbacks.empty();
+    if (becameEmpty) {
+      mCancelled.store(true, std::memory_order_relaxed);
+    }
   }
 
   if (becameEmpty) unref();
@@ -353,6 +418,9 @@ bool Watcher::unwatch(Function callback) {
       removed = true;
     }
     becameEmpty = removed && mCallbacks.empty();
+    if (becameEmpty) {
+      mCancelled.store(true, std::memory_order_relaxed);
+    }
   }
 
   if (becameEmpty) unref();
@@ -392,6 +460,7 @@ void Watcher::clearCallbacks() {
   }
 
   mCallbacks.clear();
+  mCancelled.store(true, std::memory_order_relaxed);
 }
 
 namespace {
@@ -404,7 +473,25 @@ bool isPathOrDescendant(const std::string &path, const std::string &base) {
 }
 
 #if defined(FS_EVENTS) || defined(WINDOWS)
-bool equalIgnoringCase(const std::string &left, const std::string &right) {
+bool isAsciiView(std::string_view value) {
+  for (unsigned char ch : value) {
+    if (ch >= 0x80) return false;
+  }
+  return true;
+}
+
+bool equalIgnoringCase(std::string_view left, std::string_view right) {
+  if (isAsciiView(left) && isAsciiView(right)) {
+    if (left.size() != right.size()) return false;
+    for (size_t i = 0; i < left.size(); ++i) {
+      unsigned char a = static_cast<unsigned char>(left[i]);
+      unsigned char b = static_cast<unsigned char>(right[i]);
+      if (a >= 'A' && a <= 'Z') a += 'a' - 'A';
+      if (b >= 'A' && b <= 'Z') b += 'a' - 'A';
+      if (a != b) return false;
+    }
+    return true;
+  }
 #ifdef FS_EVENTS
   CFStringRef a = CFStringCreateWithBytes(
     nullptr, reinterpret_cast<const UInt8 *>(left.data()), left.size(),
@@ -421,8 +508,8 @@ bool equalIgnoringCase(const std::string &left, const std::string &right) {
   if (b != nullptr) CFRelease(b);
   return equal;
 #elif defined(WINDOWS)
-  auto a = utf8ToUtf16(left);
-  auto b = utf8ToUtf16(right);
+  auto a = utf8ToUtf16(std::string(left));
+  auto b = utf8ToUtf16(std::string(right));
   return CompareStringOrdinal(
     a.c_str(), static_cast<int>(a.size()),
     b.c_str(), static_cast<int>(b.size()), TRUE
@@ -453,56 +540,259 @@ bool refersToSameEntry(const std::string &left, const std::string &right) {
 }
 #endif
 
+struct DirGlobState {
+  static constexpr size_t kInlineGlobs = 8;
+  bool ignored = false;
+  bool allDead = false;
+  uint64_t inlineStates[kInlineGlobs] {};
+  std::vector<uint64_t> overflowStates;
+
+  void init(size_t count) {
+    ignored = false;
+    allDead = false;
+    if (count > kInlineGlobs) {
+      overflowStates.assign(count, 0);
+    }
+  }
+
+  uint64_t *data(size_t count) {
+    return count <= kInlineGlobs ? inlineStates : overflowStates.data();
+  }
+
+  const uint64_t *data(size_t count) const {
+    return count <= kInlineGlobs ? inlineStates : overflowStates.data();
+  }
+};
+
+DirGlobState makeRootGlobState(const Watcher &watcher) {
+  DirGlobState root;
+  const size_t count = watcher.mCompiledGlobs.size();
+  root.init(count);
+  uint64_t *states = root.data(count);
+  bool anyAlive = false;
+  for (size_t i = 0; i < count; ++i) {
+    const Glob &glob = watcher.mCompiledGlobs[i];
+    states[i] = glob.mInitialState;
+    if ((states[i] & glob.mAcceptBit) != 0) {
+      root.ignored = true;
+      return root;
+    }
+    if (states[i] != 0) anyAlive = true;
+  }
+  root.allDead = !anyAlive;
+  return root;
+}
+
+DirGlobState stepDirGlobState(
+  const Watcher &watcher,
+  const DirGlobState &parentState,
+  std::string_view component,
+  std::string_view relParent
+) {
+  DirGlobState next;
+  if (parentState.ignored) {
+    next.ignored = true;
+    return next;
+  }
+  if (parentState.allDead) {
+    next.allDead = true;
+    return next;
+  }
+  const size_t count = watcher.mCompiledGlobs.size();
+  next.init(count);
+  const uint64_t *inStates = parentState.data(count);
+  uint64_t *outStates = next.data(count);
+  std::optional<DirectoryCaseSensitivity> sensitivity;
+  bool anyAlive = false;
+  for (size_t i = 0; i < count; ++i) {
+    uint64_t s = inStates[i];
+    if (s == 0) {
+      outStates[i] = 0;
+      continue;
+    }
+    const Glob &glob = watcher.mCompiledGlobs[i];
+    uint64_t stepped = glob.stepBitmask(
+      s, component, watcher.mDir, relParent, sensitivity
+    );
+    if ((stepped & glob.mAcceptBit) != 0) {
+      next.ignored = true;
+      return next;
+    }
+    outStates[i] = stepped;
+    if (stepped != 0) anyAlive = true;
+  }
+  next.allDead = !anyAlive;
+  return next;
+}
+
+bool isComponentIgnored(
+  const Watcher &watcher,
+  const DirGlobState &parentState,
+  std::string_view component,
+  std::string_view relParent
+) {
+  if (parentState.ignored) return true;
+  if (parentState.allDead) return false;
+  const size_t count = watcher.mCompiledGlobs.size();
+  const uint64_t *inStates = parentState.data(count);
+  std::optional<DirectoryCaseSensitivity> sensitivity;
+  for (size_t i = 0; i < count; ++i) {
+    uint64_t s = inStates[i];
+    if (s == 0) continue;
+    const Glob &glob = watcher.mCompiledGlobs[i];
+    uint64_t stepped = glob.stepBitmask(
+      s, component, watcher.mDir, relParent, sensitivity
+    );
+    if ((stepped & glob.mAcceptBit) != 0) {
+      return true;
+    }
+  }
+  return false;
+}
+
+struct ThreadIgnoreCache {
+  uint64_t watcherId = 0;
+  DirGlobState rootState;
+  std::string lastRelDir;
+  DirGlobState lastState;
+  bool hasLast = false;
+  std::unordered_map<std::string, DirGlobState> dirs;
+};
+
+const DirGlobState &resolveDirGlobState(
+  const Watcher &watcher,
+  std::string_view relDir
+) {
+  static thread_local ThreadIgnoreCache cache;
+  if (cache.watcherId != watcher.mId) {
+    cache.watcherId = watcher.mId;
+    cache.rootState = makeRootGlobState(watcher);
+    cache.lastRelDir.clear();
+    cache.hasLast = false;
+    cache.dirs.clear();
+  }
+  if (relDir.empty()) {
+    return cache.rootState;
+  }
+  if (cache.hasLast && cache.lastRelDir == relDir) {
+    return cache.lastState;
+  }
+  std::string key(relDir);
+  auto found = cache.dirs.find(key);
+  if (found != cache.dirs.end()) {
+    cache.lastRelDir = std::move(key);
+    cache.lastState = found->second;
+    cache.hasLast = true;
+    return cache.lastState;
+  }
+
+  if (cache.dirs.size() >= 16384) {
+    cache.dirs.clear();
+  }
+
+  DirGlobState state = cache.rootState;
+  size_t pos = 0;
+  size_t searchEnd = relDir.rfind(DIR_SEP[0]);
+  while (searchEnd != std::string_view::npos) {
+    auto ancestorIt = cache.dirs.find(std::string(relDir.substr(0, searchEnd)));
+    if (ancestorIt != cache.dirs.end()) {
+      state = ancestorIt->second;
+      pos = searchEnd + 1;
+      break;
+    }
+    if (searchEnd == 0) break;
+    searchEnd = relDir.rfind(DIR_SEP[0], searchEnd - 1);
+  }
+
+  while (pos < relDir.size()) {
+    size_t sep = relDir.find(DIR_SEP[0], pos);
+    if (sep == std::string_view::npos) sep = relDir.size();
+    std::string_view component = relDir.substr(pos, sep - pos);
+    std::string_view relParent = pos == 0
+      ? std::string_view()
+      : relDir.substr(0, pos - 1);
+    state = stepDirGlobState(watcher, state, component, relParent);
+    cache.dirs.emplace(std::string(relDir.substr(0, sep)), state);
+    pos = sep + 1;
+  }
+
+  cache.lastRelDir = std::move(key);
+  cache.lastState = state;
+  cache.hasLast = true;
+  return cache.lastState;
+}
+
 } // namespace
 
-bool Watcher::isIgnored(std::string path) {
-  for (const auto &ignored : mIgnorePaths) {
-    if (isPathOrDescendant(path, ignored)) return true;
-  }
-  {
-    std::lock_guard<std::mutex> lock(mIgnoreAliasesMutex);
-    for (const auto &alias : mIgnoreAliases) {
-      if (isPathOrDescendant(path, alias)) return true;
+bool Watcher::isIgnored(const std::string &path) {
+  if (!mIgnorePaths.empty()) {
+    for (const auto &ignored : mIgnorePaths) {
+      if (isPathOrDescendant(path, ignored)) return true;
     }
-  }
+    if (mHasIgnoreAliases.load(std::memory_order_acquire)) {
+      std::lock_guard<std::mutex> lock(mIgnoreAliasesMutex);
+      for (const auto &alias : mIgnoreAliases) {
+        if (isPathOrDescendant(path, alias)) return true;
+      }
+    }
 
 #if defined(FS_EVENTS) || defined(WINDOWS)
-  // Compare complete path components before asking the filesystem whether
-  // differently cased spellings really identify the same entry. This keeps
-  // distinct names distinct on case-sensitive volumes.
-  for (const auto &ignored : mIgnorePaths) {
-    std::string ancestor = path;
-    while (!ancestor.empty()) {
-      if (equalIgnoringCase(ancestor, ignored) &&
-          refersToSameEntry(ancestor, ignored)) {
-        std::lock_guard<std::mutex> lock(mIgnoreAliasesMutex);
-        mIgnoreAliases.insert(ancestor);
-        return true;
+    // Compare complete path components before asking the filesystem whether
+    // differently cased spellings really identify the same entry. This keeps
+    // distinct names distinct on case-sensitive volumes.
+    for (const auto &ignored : mIgnorePaths) {
+      std::string_view ancestor(path);
+      while (!ancestor.empty()) {
+        if (equalIgnoringCase(ancestor, ignored)) {
+          std::string ancestorStr(ancestor);
+          if (refersToSameEntry(ancestorStr, ignored)) {
+            std::lock_guard<std::mutex> lock(mIgnoreAliasesMutex);
+            mIgnoreAliases.insert(ancestorStr);
+            mHasIgnoreAliases.store(true, std::memory_order_release);
+            return true;
+          }
+        }
+        size_t separator = ancestor.find_last_of(DIR_SEP);
+        if (separator == std::string_view::npos) break;
+        ancestor = ancestor.substr(0, separator);
       }
-      size_t separator = ancestor.find_last_of(DIR_SEP);
-      if (separator == std::string::npos) break;
-      ancestor.resize(separator);
     }
-  }
 #endif
+  }
 
-  auto basePath = mDir + DIR_SEP;
-
-  if (path.rfind(basePath, 0) != 0) {
+  if (mCompiledGlobs.empty()) {
     return false;
   }
 
-  auto relativePath = path.substr(basePath.size());
+  if (path.size() <= mDir.size() ||
+      path.compare(0, mDir.size(), mDir) != 0 ||
+      path[mDir.size()] != DIR_SEP[0]) {
+    return false;
+  }
 
-  for (auto it = mIgnoreGlobs.begin(); it != mIgnoreGlobs.end(); it++) {
-    if (it->isIgnored(relativePath, mDir)) {
+  std::string_view relativePath(
+    path.data() + mDir.size() + 1,
+    path.size() - mDir.size() - 1
+  );
+  if (relativePath.empty()) {
+    return false;
+  }
+
+  if (mAllGlobsUseBitmask && mId != 0) {
+    size_t relSep = relativePath.rfind(DIR_SEP[0]);
+    std::string_view relDir = relSep == std::string_view::npos
+      ? std::string_view()
+      : relativePath.substr(0, relSep);
+    std::string_view leafName = relSep == std::string_view::npos
+      ? relativePath
+      : relativePath.substr(relSep + 1);
+    const DirGlobState &parentState = resolveDirGlobState(*this, relDir);
+    return isComponentIgnored(*this, parentState, leafName, relDir);
+  }
+
+  for (const auto &glob : mCompiledGlobs) {
+    if (glob.isPathOrAncestorIgnored(relativePath, mDir)) {
       return true;
-    }
-    for (size_t end = relativePath.find(DIR_SEP); end != std::string::npos;
-         end = relativePath.find(DIR_SEP, end + 1)) {
-      if (it->isIgnored(relativePath.substr(0, end), mDir)) {
-        return true;
-      }
     }
   }
 

@@ -193,6 +193,9 @@ void addCreatedPath(
       const IndexedPath &candidateEntry
     ) {
       recordCreatedPath(state, events, candidate, candidateEntry);
+    },
+    [watcher]() {
+      return watcher != nullptr && watcher->isCancelled();
     }
   );
 }
@@ -285,8 +288,14 @@ void reconcileFullTree(WatcherRef watcher, State *state) {
     },
     [newTree](const std::string &path, const IndexedPath &entry) {
       newTree->add(path, entry.mtime, entry.isDirectory);
+    },
+    [watcher]() {
+      return watcher != nullptr && watcher->isCancelled();
     }
   );
+  if (watcher != nullptr && watcher->isCancelled()) {
+    return;
+  }
 
   RenameCandidates removed;
   RenameCandidates created;
@@ -799,8 +808,27 @@ void FSEventsBackend::startStream(WatcherRef watcher, FSEventStreamEventId id) {
     },
     [state](const std::string &path, const IndexedPath &entry) {
       state->tree->add(path, entry.mtime, entry.isDirectory);
+    },
+    [watcher]() {
+      return watcher->isCancelled();
     }
   );
+
+  if (watcher->isCancelled()) {
+    watcher->mNeedsResubscribe = true;
+    auto stoppedStream = state->stream.exchange(nullptr);
+    if (stoppedStream != nullptr) {
+      if (Watcher::isProcessExiting()) {
+        FSEventStreamStop(stoppedStream);
+        FSEventStreamInvalidate(stoppedStream);
+        FSEventStreamRelease(stoppedStream);
+        state->cleanupComplete.notify();
+      } else {
+        stopStreamAfterCallback(stateGuard, stoppedStream);
+      }
+    }
+    return;
+  }
 
   {
     std::lock_guard<std::mutex> lock(state->initializationMutex);

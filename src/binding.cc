@@ -1,3 +1,5 @@
+#include <cstdlib>
+#include <mutex>
 #include <unordered_set>
 #include <node_api.h>
 #include <napi.h>
@@ -131,9 +133,11 @@ private:
 
   void execute() override {
     try {
-      backend->watch(watcher);
-      watcher->addBackend(backend);
-      if (!watcher->hasCallbacksForEnvironment(callbackEnv)) {
+      if (!watcher->isCancelled() && watcher->hasCallbacksForEnvironment(callbackEnv)) {
+        backend->watch(watcher);
+        watcher->addBackend(backend);
+      }
+      if (!Watcher::isProcessExiting() && !watcher->hasCallbacksForEnvironment(callbackEnv)) {
         backend->unwatch(watcher);
       }
       releaseBackend();
@@ -273,12 +277,35 @@ void cleanupEnvironment(void *data) {
   Watcher::cleanupEnvironment(static_cast<napi_env>(data));
 }
 
+void onProcessExit(const CallbackInfo &info) {
+  Watcher::cancelEnvironment(info.Env());
+}
+
 Object Init(Env env, Object exports) {
+  static std::once_flag atexitRegistered;
+  std::call_once(atexitRegistered, []() {
+    std::atexit(Watcher::notifyProcessExiting);
+  });
+
   napi_status status = napi_add_env_cleanup_hook(env, cleanupEnvironment, env);
   if (status != napi_ok) {
     Error::New(env, "Unable to register environment cleanup hook")
       .ThrowAsJavaScriptException();
     return exports;
+  }
+
+  Value processVal = env.Global().Get("process");
+  if (processVal.IsObject()) {
+    Object processObj = processVal.As<Object>();
+    Value onVal = processObj.Get("once");
+    if (onVal.IsFunction()) {
+      Function onceFn = onVal.As<Function>();
+      Function exitListener = Function::New(env, onProcessExit);
+      onceFn.Call(processObj, {String::New(env, "exit"), exitListener});
+      if (env.IsExceptionPending()) {
+        env.GetAndClearPendingException();
+      }
+    }
   }
 
   exports.Set(

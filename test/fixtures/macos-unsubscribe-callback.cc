@@ -49,7 +49,7 @@ Watcher::Watcher(
     mIgnorePaths(std::move(ignorePaths)),
     mIgnoreGlobs(std::move(ignoreGlobs)) {}
 
-bool Watcher::isIgnored(std::string) {
+bool Watcher::isIgnored(const std::string &) {
   return false;
 }
 

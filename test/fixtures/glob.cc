@@ -40,9 +40,14 @@ int main() {
   assert(Glob("*a").isIgnored(std::string("\xc0") + "a", "/root"));
   assert(Glob("*.log").isIgnored(std::string("\xc0") + ".log", "/root"));
   misses("one/*", "one/two/three");
+  assert(Glob("one/*").isPathOrAncestorIgnored("one/two/three", "/root"));
+  assert(Glob("**/node_modules").isPathOrAncestorIgnored("a/node_modules/pkg/index.js", "/root"));
+  assert(!Glob("**/node_modules").isPathOrAncestorIgnored("a/b/c/d/e/f", "/root"));
   sensitivity = DirectoryCaseSensitivity::Insensitive;
   matches("CACHE", "cache");
+  assert(Glob("CACHE").isPathOrAncestorIgnored("cache/sub/file.txt", "/root"));
   sensitivity = DirectoryCaseSensitivity::Unknown;
   misses("CACHE", "cache");
+  assert(!Glob("CACHE").isPathOrAncestorIgnored("cache/sub/file.txt", "/root"));
   return 0;
 }

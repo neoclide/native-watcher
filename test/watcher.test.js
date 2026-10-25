@@ -1795,3 +1795,83 @@ test('a move across an ignore boundary is not reported as a rename pair', async 
   assert.equal(removed.renameId, undefined);
   assertNoPath(events, ignoredDirectory);
 });
+
+test('cancels an in-progress initial scan on process.exit and allows resubscribe after early unsubscribe', async (t) => {
+  const tempDirectory = await fs.realpath(os.tmpdir());
+  const directory = await fs.mkdtemp(
+    path.join(tempDirectory, 'native-watcher-scan-cancel-'),
+  );
+  t.after(() => fs.rm(directory, {recursive: true, force: true}));
+
+  let deepDir = directory;
+  for (let level = 1; level <= 8; level++) {
+    deepDir = path.join(deepDir, `level-${level}`);
+  }
+  await fs.mkdir(deepDir, {recursive: true});
+  const existingFile = path.join(deepDir, 'existing.txt');
+  await fs.writeFile(existingFile, 'before');
+  for (let i = 0; i < 40; i++) {
+    const leaf = path.join(deepDir, `dir-${i}`);
+    await fs.mkdir(leaf);
+    await fs.writeFile(path.join(leaf, 'file.txt'), 'init');
+  }
+
+  const ignoreGlobs = [
+    '**/.git',
+    '**/.git/**',
+    '**/node_modules',
+    '**/node_modules/**',
+  ];
+
+  const bindingPath = path.join(
+    __dirname,
+    '..',
+    'build',
+    'Release',
+    'native_watcher.node',
+  );
+  const {stdout} = await execFileAsync(
+    process.execPath,
+    [
+      '-e',
+      `
+        const binding = require(process.argv[1]);
+        const root = process.argv[2];
+        const ignoreGlobs = JSON.parse(process.argv[3]);
+        binding.subscribe(root, () => {}, {ignoreGlobs});
+        setTimeout(() => {
+          console.log('exiting');
+          process.exit(0);
+        }, 5);
+      `,
+      bindingPath,
+      directory,
+      JSON.stringify(ignoreGlobs),
+    ],
+    {timeout: 5000},
+  );
+  assert.match(stdout, /exiting/);
+
+  const binding = require(bindingPath);
+  const noop = () => {};
+  const cancelledSub = binding.subscribe(directory, noop, {ignoreGlobs});
+  const unsub = binding.unsubscribe(directory, noop, {ignoreGlobs});
+  await Promise.all([cancelledSub, unsub]);
+
+  const collector = new EventCollector();
+  const subscription = await watcher.subscribe(directory, collector.callback, {
+    ignoreGlobs,
+  });
+  t.after(() => subscription.unsubscribe());
+
+  const barrier = path.join(directory, 'barrier.txt');
+  let mark = collector.mark();
+  let waiting = collector.waitFor('create', barrier, mark);
+  await fs.writeFile(barrier, 'ready');
+  await waiting;
+
+  mark = collector.mark();
+  waiting = collector.waitFor('update', existingFile, mark);
+  await fs.writeFile(existingFile, 'after');
+  assertEvent(await waiting, 'update', existingFile);
+});

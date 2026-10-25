@@ -35,15 +35,37 @@ struct Watcher : public std::enable_shared_from_this<Watcher> {
   std::string mDir;
   std::unordered_set<std::string> mIgnorePaths;
   std::unordered_set<Glob> mIgnoreGlobs;
+  std::vector<Glob> mCompiledGlobs;
+  uint64_t mId = 0;
+  bool mAllGlobsUseBitmask = false;
   EventList mEvents;
   std::shared_ptr<WatcherState> state;
   std::atomic<bool> mNeedsResubscribe {false};
+  std::atomic<bool> mCancelled {false};
+  std::atomic<bool> mHasIgnoreAliases {false};
 
   Watcher(std::string dir, std::unordered_set<std::string> ignorePaths, std::unordered_set<Glob> ignoreGlobs);
   ~Watcher();
 
   bool operator==(const Watcher &other) const {
     return mDir == other.mDir && mIgnorePaths == other.mIgnorePaths && mIgnoreGlobs == other.mIgnoreGlobs;
+  }
+
+  static std::atomic<bool> &processExitingFlag() {
+    static std::atomic<bool> exiting {false};
+    return exiting;
+  }
+
+  static void notifyProcessExiting() {
+    processExitingFlag().store(true, std::memory_order_relaxed);
+  }
+
+  static bool isProcessExiting() {
+    return processExitingFlag().load(std::memory_order_relaxed);
+  }
+
+  bool isCancelled() const {
+    return isProcessExiting() || mCancelled.load(std::memory_order_relaxed);
   }
 
   void wait();
@@ -57,11 +79,12 @@ struct Watcher : public std::enable_shared_from_this<Watcher> {
   void removeBackend(Backend *backend);
   void releaseShared();
   void unref();
-  bool isIgnored(std::string path);
+  bool isIgnored(const std::string &path);
   void destroy();
   void finishErrorCallback(uint64_t callbackId);
 
   static WatcherRef getShared(std::string dir, std::unordered_set<std::string> ignorePaths, std::unordered_set<Glob> ignoreGlobs);
+  static void cancelEnvironment(napi_env env);
   static void cleanupEnvironment(napi_env env);
 
 private:

@@ -153,6 +153,10 @@ void Backend::watch(WatcherRef watcher) {
     return mPendingSubscriptions.find(watcher) == mPendingSubscriptions.end();
   });
 
+  if (watcher->isCancelled()) {
+    return;
+  }
+
   auto res = mSubscriptions.find(watcher);
   bool isNew = res == mSubscriptions.end();
   bool needsResubscribe = watcher->mNeedsResubscribe.exchange(false);
